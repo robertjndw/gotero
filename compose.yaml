@@ -1,0 +1,64 @@
+# Dev setup. Builds from the working tree, no .env needed.
+# Don't deploy this (hardcoded secret and admin password), use deploy/compose.yaml.
+#
+#   docker compose up --build
+#   -> http://localhost:8080, login admin / gotero-admin
+#
+# Zotero: set extensions.zotero.api.url to http://localhost:8080/api/
+#
+# UI with hot reload: cd web && VITE_API_URL=http://localhost:8080 pnpm dev
+#
+# Wipe everything: docker compose down -v
+name: gotero-dev
+
+services:
+  gotero:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+      args:
+        VERSION: dev
+    image: gotero:dev
+    pull_policy: build
+    environment:
+      GOTERO_DATABASE_URL: postgres://gotero:gotero@postgres:5432/gotero?sslmode=disable
+      GOTERO_SECRET: dev-secret-not-for-production-0123456789abcdef
+      GOTERO_ADMIN_USERNAME: admin
+      GOTERO_ADMIN_PASSWORD: gotero-admin
+      GOTERO_ADMIN_EMAIL: admin@example.org
+      GOTERO_OPEN_REGISTRATION: "true"
+      GOTERO_LOG_FORMAT: text
+      GOTERO_LOG_LEVEL: ${GOTERO_LOG_LEVEL:-debug}
+    ports:
+      - "${GOTERO_DEV_PORT:-8080}:8080"
+    volumes:
+      - files:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/gotero", "healthcheck"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: gotero
+      POSTGRES_PASSWORD: gotero
+      POSTGRES_DB: gotero
+    # psql postgres://gotero:gotero@localhost:5433/gotero
+    ports:
+      - "127.0.0.1:${GOTERO_DEV_PG_PORT:-5433}:5432"
+    volumes:
+      - postgres:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gotero -d gotero"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+volumes:
+  files:
+  postgres:

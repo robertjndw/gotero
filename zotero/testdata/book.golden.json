@@ -1,0 +1,16 @@
+{
+  "key": "ABCD2345",
+  "version": 12,
+  "itemType": "book",
+  "title": "A Book",
+  "creators": [{"creatorType":"author","firstName":"A","lastName":"B"}],
+  "abstractNote": "Hello <b> & \"quoted\"",
+  "numPages": "200",
+  "ISBN": "123",
+  "extra": "x",
+  "tags": [{"tag":"a"}],
+  "collections": ["EFGH6789"],
+  "relations": {},
+  "dateAdded": "2024-01-01T00:00:00Z",
+  "dateModified": "2024-01-02T03:04:05Z"
+}

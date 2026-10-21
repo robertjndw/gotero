@@ -1,0 +1,14 @@
+{
+  "manifest_version": 2,
+  "name": "gotero e2e test driver",
+  "version": "1.0.0",
+  "description": "Remote control endpoints for the gotero desktop e2e harness. Test builds only.",
+  "applications": {
+    "zotero": {
+      "id": "gotero-e2e@gotero.invalid",
+      "update_url": "https://gotero.invalid/update.json",
+      "strict_min_version": "6.999",
+      "strict_max_version": "99.*"
+    }
+  }
+}

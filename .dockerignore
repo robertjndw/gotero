@@ -1,0 +1,7 @@
+.git
+**/node_modules
+internal/webui/dist/*
+!internal/webui/dist/.gitkeep
+e2e/**/.cache
+deploy/.env
+bin

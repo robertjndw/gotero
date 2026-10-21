@@ -1,0 +1,11 @@
+{
+  "key": "STUV2345",
+  "version": 2,
+  "itemType": "note",
+  "note": "<p>hi</p>",
+  "tags": [],
+  "collections": ["ABCD2345"],
+  "relations": {},
+  "dateAdded": "2024-01-01T00:00:00Z",
+  "dateModified": "2024-01-01T00:00:00Z"
+}

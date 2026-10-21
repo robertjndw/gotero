@@ -1,0 +1,18 @@
+go 1.26.0
+
+use (
+	.
+	./conformance
+	./storage
+	./zotero
+	./zoteroclient
+)
+
+// Inter-module requirements stay at v0.0.0 until the first library tags;
+// these replaces only apply inside this workspace, never to consumers.
+replace (
+	github.com/robertjndw/gotero/conformance v0.0.0 => ./conformance
+	github.com/robertjndw/gotero/storage v0.0.0 => ./storage
+	github.com/robertjndw/gotero/zotero v0.0.0 => ./zotero
+	github.com/robertjndw/gotero/zoteroclient v0.0.0 => ./zoteroclient
+)

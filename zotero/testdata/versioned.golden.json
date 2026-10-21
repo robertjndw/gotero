@@ -1,0 +1,15 @@
+{
+  "key": "ABCD2345",
+  "version": 1,
+  "itemType": "book",
+  "title": "T",
+  "originalDate": "1900",
+  "DOI": "10.1/x",
+  "citationKey": "k",
+  "tags": [],
+  "collections": [],
+  "relations": {},
+  "dateAdded": "2024-01-01T00:00:00Z",
+  "dateModified": "2024-01-01T00:00:00Z",
+  "eventPlace": "x"
+}

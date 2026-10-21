@@ -1,0 +1,59 @@
+name: contracts
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  client-js:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Keep in sync with e2e/contract/zotero-ref.json.
+        zotero_ref: ["10.0.6", "9.0.6"]
+    env:
+      GOTERO_URL: http://localhost:8080
+      GOTERO_ADMIN_USER: admin
+      GOTERO_ADMIN_PASSWORD: ci-admin-password
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: write deploy/.env
+        run: |
+          {
+            echo "GOTERO_SECRET=$(openssl rand -hex 32)"
+            echo "GOTERO_ADMIN_USERNAME=${GOTERO_ADMIN_USER}"
+            echo "GOTERO_ADMIN_PASSWORD=${GOTERO_ADMIN_PASSWORD}"
+          } > deploy/.env
+      - name: start gotero
+        run: docker compose -f deploy/compose.yaml up -d --build
+      - name: wait for /healthz
+        run: |
+          for _ in $(seq 1 60); do
+            curl -fsS "$GOTERO_URL/healthz" && exit 0
+            sleep 2
+          done
+          echo "gotero did not become healthy" >&2
+          exit 1
+      - name: cache Zotero client files
+        uses: actions/cache@v4
+        with:
+          path: e2e/contract/.cache
+          key: zotero-client-${{ matrix.zotero_ref }}-${{ hashFiles('e2e/contract/zotero-ref.json') }}
+      - name: contract tests
+        env:
+          ZOTERO_REF: ${{ matrix.zotero_ref }}
+        run: e2e/contract/run.sh
+      - name: gotero logs
+        if: failure()
+        run: docker compose -f deploy/compose.yaml logs --no-color gotero postgres
+      - name: stop gotero
+        if: always()
+        run: docker compose -f deploy/compose.yaml down -v

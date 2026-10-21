@@ -1,0 +1,59 @@
+name: conformance
+
+# Runs the protocol conformance kit against the real Docker image, once per
+# storage backend, exactly as users deploy it with Docker Compose.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        storage: [local, s3, webdav]
+    env:
+      GOTERO_PUBLIC_URL: http://localhost:8080
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.work
+          cache-dependency-path: "**/go.sum"
+
+      - name: configure
+        run: |
+          {
+            echo "GOTERO_SECRET=$(openssl rand -hex 32)"
+            echo "GOTERO_ADMIN_USERNAME=admin"
+            echo "GOTERO_ADMIN_PASSWORD=conformance-admin-password"
+          } > deploy/.env
+          files="-f deploy/compose.yaml"
+          if [ "${{ matrix.storage }}" != local ]; then
+            files="$files -f deploy/compose.${{ matrix.storage }}.yaml --profile ${{ matrix.storage }}"
+          fi
+          echo "COMPOSE=docker compose $files" >> "$GITHUB_ENV"
+
+      - name: start gotero
+        run: |
+          $COMPOSE up -d --build --wait --wait-timeout 180
+
+      - name: run conformance kit
+        working-directory: conformance
+        env:
+          GOTERO_CONFORMANCE_URL: http://localhost:8080/api/
+          GOTERO_CONFORMANCE_STREAM_URL: ws://localhost:8080/stream
+          GOTERO_CONFORMANCE_ADMIN_USER: admin
+          GOTERO_CONFORMANCE_ADMIN_PASS: conformance-admin-password
+        run: go test -count=1 -v ./gotero -run TestConformance
+
+      - name: gotero logs
+        if: failure()
+        run: $COMPOSE logs gotero

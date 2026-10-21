@@ -1,0 +1,21 @@
+{
+  "repo": "zotero/zotero",
+  "baseDir": "chrome/content/zotero/xpcom/",
+  "files": ["sync/syncAPIClient.js", "storage/zfs.js"],
+  "refs": {
+    "10.0.6": {
+      "label": "current",
+      "sha256": {
+        "sync/syncAPIClient.js": "297b3a1fc81ecabe9ebdb3def66fdf1d1873043f2b381b11cba96aae191ed55f",
+        "storage/zfs.js": "4d4f57b5130ee3102ce6bddfa2294b28815a2034504b6cd7067a655ffdcb7ac5"
+      }
+    },
+    "9.0.6": {
+      "label": "previous-major",
+      "sha256": {
+        "sync/syncAPIClient.js": "ad924dc13ae43701e55a42502befc9f23859bff3b1aa8cd92ee750dcaf1f5ac3",
+        "storage/zfs.js": "75bb308c81b868fad58414a954c2c31334c48c40e2d7fd6ba10e7a7314485618"
+      }
+    }
+  }
+}

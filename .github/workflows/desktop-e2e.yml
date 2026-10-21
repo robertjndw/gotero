@@ -1,0 +1,120 @@
+name: desktop-e2e
+
+# Real Zotero desktop builds (current stable, previous major, newest 7.0.x)
+# syncing against a freshly built gotero. Heavy, so it only runs on demand,
+# nightly, on tags and on PRs carrying the `e2e-desktop` label.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+  pull_request:
+    types: [labeled, synchronize, reopened]
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: desktop-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  versions:
+    # On PRs only run when the label is present
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'e2e-desktop')
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - id: resolve
+        working-directory: e2e/desktop
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          matrix="$(node versions.mjs --legacy)"
+          echo "$matrix"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  e2e:
+    needs: versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        zotero: ${{ fromJSON(needs.versions.outputs.matrix).include }}
+        shard: [1, 2, 3]
+    name: zotero ${{ matrix.zotero.version }} (${{ matrix.zotero.label }}) shard ${{ matrix.shard }}/3
+    env:
+      ZOTERO_VERSION: ${{ matrix.zotero.version }}
+      # The Zotero containers reach the host through host.docker.internal, so
+      # the server's public URL (checked against Origin) uses that name too.
+      GOTERO_URL: http://host.docker.internal:8080
+      GOTERO_ADMIN_USER: admin
+      GOTERO_ADMIN_PASSWORD: e2e-admin-password
+      GOTERO_LOG_CMD: docker compose -f deploy/compose.yaml logs --no-color gotero
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Resolve host.docker.internal on the runner
+        run: echo "127.0.0.1 host.docker.internal" | sudo tee -a /etc/hosts
+
+      - name: Cache Zotero tarballs
+        uses: actions/cache@v4
+        with:
+          path: e2e/desktop/.cache/tarballs
+          key: zotero-tarball-${{ matrix.zotero.version }}-amd64
+
+      - name: Build runner image and unpack Zotero
+        working-directory: e2e/desktop
+        run: |
+          node fetch-zotero.mjs "$ZOTERO_VERSION" --arch amd64
+          docker build --platform linux/amd64 -t gotero-e2e-runner:amd64 .
+
+      - name: Start gotero with Postgres
+        run: |
+          cat > deploy/.env <<ENV
+          GOTERO_SECRET=$(openssl rand -hex 32)
+          GOTERO_ADMIN_USERNAME=${GOTERO_ADMIN_USER}
+          GOTERO_ADMIN_PASSWORD=${GOTERO_ADMIN_PASSWORD}
+          GOTERO_ADMIN_EMAIL=admin@example.invalid
+          GOTERO_PUBLIC_URL=${GOTERO_URL}
+          GOTERO_TAG=ci
+          ENV
+          docker compose -f deploy/compose.yaml build gotero
+          docker compose -f deploy/compose.yaml up -d --wait
+
+      - name: Run scenarios
+        working-directory: e2e/desktop
+        env:
+          E2E_ARCH: amd64
+          E2E_ARTIFACTS_DIR: ${{ github.workspace }}/e2e-artifacts
+          E2E_START_TIMEOUT_MS: "300000"
+          NODE_TEST_ARGS: --test-shard=${{ matrix.shard }}/3
+        run: ./run.sh scenarios
+
+      - name: Collect server logs
+        if: failure()
+        run: |
+          mkdir -p e2e-artifacts
+          docker compose -f deploy/compose.yaml logs --no-color > e2e-artifacts/compose.log || true
+
+      - name: Upload artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-desktop-${{ matrix.zotero.version }}-shard${{ matrix.shard }}
+          path: e2e-artifacts
+          if-no-files-found: ignore
+
+      - name: Stop stack
+        if: always()
+        run: docker compose -f deploy/compose.yaml down -v

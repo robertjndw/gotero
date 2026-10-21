@@ -1,0 +1,19 @@
+{
+  "key": "NPQR2345",
+  "version": 7,
+  "parentItem": "ABCD2345",
+  "itemType": "attachment",
+  "linkMode": "imported_file",
+  "title": "a.pdf",
+  "accessDate": "",
+  "url": "",
+  "contentType": "application/pdf",
+  "charset": "",
+  "filename": "a.pdf",
+  "md5": "d41d8cd98f00b204e9800998ecf8427e",
+  "mtime": 1700000000000,
+  "tags": [],
+  "relations": {},
+  "dateAdded": "2024-01-01T00:00:00Z",
+  "dateModified": "2024-01-01T00:00:00Z"
+}

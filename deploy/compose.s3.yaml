@@ -1,0 +1,15 @@
+# Use the bundled S3 gateway for file storage:
+#   docker compose -f deploy/compose.yaml -f deploy/compose.s3.yaml --profile s3 up -d
+# For a real S3 service, skip this file and set GOTERO_STORAGE_S3_* in .env.
+services:
+  gotero:
+    environment:
+      GOTERO_STORAGE_BACKEND: s3
+      GOTERO_STORAGE_S3_ENDPOINT: s3:9000
+      GOTERO_STORAGE_S3_BUCKET: zotero
+      GOTERO_STORAGE_S3_ACCESS_KEY: ${GOTERO_STORAGE_S3_ACCESS_KEY:-gotero}
+      GOTERO_STORAGE_S3_SECRET_KEY: ${GOTERO_STORAGE_S3_SECRET_KEY:-gotero-secret}
+      GOTERO_STORAGE_S3_USE_SSL: "false"
+    depends_on:
+      s3:
+        condition: service_started
