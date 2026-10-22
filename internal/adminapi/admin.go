@@ -42,13 +42,9 @@ func (a *API) adminListUsers(c *gin.Context) error {
 		return err
 	}
 	p := paginate(rows, limit, func(u repo.User) int64 { return u.ID })
-	items := make([]userDTO, 0, len(p.Items))
-	for _, u := range p.Items {
-		d, err := a.userDTO(c.Request.Context(), u)
-		if err != nil {
-			return err
-		}
-		items = append(items, d)
+	items, err := a.userDTOs(c.Request.Context(), p.Items)
+	if err != nil {
+		return err
 	}
 	c.JSON(http.StatusOK, page[userDTO]{Items: items, NextCursor: p.NextCursor})
 	return nil
@@ -124,6 +120,21 @@ func (a *API) adminDeleteUser(c *gin.Context) error {
 		return err
 	}
 	a.accessChanged(id)
+	c.Status(http.StatusNoContent)
+	return nil
+}
+
+// adminDeleteIdentity goes through UnlinkIdentity like the self-service
+// endpoint, so an admin cannot strand a user without any way to sign in
+// either; set a password first if the identity really has to go.
+func (a *API) adminDeleteIdentity(c *gin.Context) error {
+	id, err := pathID(c, "id")
+	if err != nil {
+		return err
+	}
+	if err := a.Accounts.UnlinkIdentity(c.Request.Context(), id, c.Param("provider")); err != nil {
+		return err
+	}
 	c.Status(http.StatusNoContent)
 	return nil
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/robertjndw/gotero/internal/config"
 	"github.com/robertjndw/gotero/internal/jobs"
 	"github.com/robertjndw/gotero/internal/repo"
+	"github.com/robertjndw/gotero/internal/sso"
 )
 
 // GC is implemented by the garbage collector for orphaned blobs
@@ -75,6 +76,9 @@ type Deps struct {
 	// ImportValidator checks zotero.org keys when an import is queued. Without
 	// one, any well-formed key is accepted and fails later in the worker.
 	ImportValidator ImportValidator
+	// SSO lists the configured OIDC and SAML providers. A nil registry means
+	// none.
+	SSO *sso.Registry
 }
 
 type API struct {
@@ -111,6 +115,7 @@ func (a *API) Register(r gin.IRouter) {
 	u.GET("/me", a.handle(a.getMe))
 	u.PATCH("/me", a.handle(a.patchMe))
 	u.POST("/me/password", a.handle(a.changePassword))
+	u.DELETE("/me/identities/:provider", a.handle(a.deleteMyIdentity))
 	u.GET("/me/keys", a.handle(a.listKeys))
 	u.POST("/me/keys", a.handle(a.createKey))
 	u.DELETE("/me/keys/:id", a.handle(a.deleteKey))
@@ -141,6 +146,7 @@ func (a *API) Register(r gin.IRouter) {
 	adm.POST("/users", a.handle(a.adminCreateUser))
 	adm.PATCH("/users/:id", a.handle(a.adminPatchUser))
 	adm.DELETE("/users/:id", a.handle(a.adminDeleteUser))
+	adm.DELETE("/users/:id/identities/:provider", a.handle(a.adminDeleteIdentity))
 	adm.GET("/invites", a.handle(a.adminListInvites))
 	adm.POST("/invites", a.handle(a.adminCreateInvite))
 	adm.DELETE("/invites/:id", a.handle(a.adminDeleteInvite))
@@ -234,6 +240,20 @@ func (a *API) translate(c *gin.Context, err error) *apiError {
 		return newErr(http.StatusConflict, "self_modification", "You cannot demote, disable or delete your own account.")
 	case errors.Is(err, accounts.ErrOwnsGroups):
 		return newErr(http.StatusConflict, "owns_groups", "This user still owns groups. Transfer or delete them first.")
+	case errors.Is(err, accounts.ErrLocalLoginDisabled):
+		return newErr(http.StatusForbidden, "local_login_disabled", "Password sign-in is disabled on this server.")
+	case errors.Is(err, accounts.ErrLastLoginMethod):
+		return newErr(http.StatusConflict, "last_login_method", "That is the only way to sign in to this account.")
+	case errors.Is(err, accounts.ErrIdentityInUse):
+		return newErr(http.StatusConflict, "identity_in_use", "That identity is already linked to an account.")
+	case errors.Is(err, accounts.ErrLinkRequired):
+		return newErr(http.StatusConflict, "link_required", "An account with this email exists; sign in to it and connect the provider.")
+	case errors.Is(err, accounts.ErrNoAccount):
+		return newErr(http.StatusForbidden, "no_account", "No account is linked to this identity.")
+	case errors.Is(err, accounts.ErrInviteEmailMismatch):
+		return newErr(http.StatusForbidden, "invite_email_mismatch", "The email does not match the invitation.")
+	case errors.Is(err, accounts.ErrDisabled):
+		return newErr(http.StatusForbidden, "disabled", "This account is disabled.")
 	case errors.Is(err, repo.ErrNotFound):
 		return errNotFound
 	case errors.Is(err, repo.ErrConflict):

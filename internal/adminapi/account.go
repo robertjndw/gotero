@@ -2,6 +2,7 @@ package adminapi
 
 import (
 	"net/http"
+	"net/url"
 
 	"github.com/gin-gonic/gin"
 
@@ -16,10 +17,19 @@ func (a *API) getSetup(c *gin.Context) error {
 	if err != nil {
 		return err
 	}
+	providers := []gin.H{}
+	for _, p := range a.SSO.List() {
+		providers = append(providers, gin.H{
+			"id": p.Name(), "kind": p.Kind(), "displayName": p.DisplayName(),
+			"startUrl": "/auth/" + string(p.Kind()) + "/" + url.PathEscape(p.Name()) + "/start",
+		})
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"openRegistration": open,
 		"publicUrl":        httpx.BaseURL(c.Request.Context()),
 		"version":          a.Version,
+		"localLogin":       a.Config.LocalLogin,
+		"providers":        providers,
 	})
 	return nil
 }
@@ -100,8 +110,15 @@ func (a *API) changePassword(c *gin.Context) error {
 	}
 	ctx := c.Request.Context()
 	u := currentUser(c)
-	if ok, err := auth.VerifyPassword(u.PasswordHash, in.CurrentPassword); err != nil || !ok {
-		return fieldError("currentPassword", "Current password is incorrect.")
+	if !a.Accounts.LocalLoginAllowed(u) {
+		return accounts.ErrLocalLoginDisabled
+	}
+	// SSO-only accounts have no password to confirm; they are already
+	// authenticated by their session.
+	if u.PasswordHash != "" {
+		if ok, err := auth.VerifyPassword(u.PasswordHash, in.CurrentPassword); err != nil || !ok {
+			return fieldError("currentPassword", "Current password is incorrect.")
+		}
 	}
 	if err := accounts.ValidatePassword(in.NewPassword); err != nil {
 		return renameFields(err, "password", "newPassword")
@@ -160,6 +177,14 @@ func (a *API) deleteKey(c *gin.Context) error {
 	}
 	// Streaming connections using that key must stop receiving updates.
 	a.accessChanged(currentUser(c).ID)
+	c.Status(http.StatusNoContent)
+	return nil
+}
+
+func (a *API) deleteMyIdentity(c *gin.Context) error {
+	if err := a.Accounts.UnlinkIdentity(c.Request.Context(), currentUser(c).ID, c.Param("provider")); err != nil {
+		return err
+	}
 	c.Status(http.StatusNoContent)
 	return nil
 }
