@@ -1,10 +1,10 @@
 import { useState } from 'react'
-import { Link } from '@tanstack/react-router'
+import { Link, useSearch } from '@tanstack/react-router'
 import { useForm, Controller } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { toast } from 'sonner'
-import { AlertTriangle, KeyRound, Plus, Trash2 } from 'lucide-react'
+import { AlertTriangle, KeyRound, Plus, Trash2, Unlink } from 'lucide-react'
 import {
   errorMessage,
   useChangePassword,
@@ -13,9 +13,11 @@ import {
   useMe,
   useMyGroups,
   useRevokeKey,
+  useSetup,
+  useUnlinkIdentity,
   useUpdateProfile,
 } from '@/lib/queries'
-import type { ApiKey, ApiKeyAccess, CreatedApiKey } from '@/lib/types'
+import type { ApiKey, ApiKeyAccess, CreatedApiKey, Identity } from '@/lib/types'
 import { formatDate, relativeTime } from '@/lib/format'
 import { applyServerError } from '@/lib/forms'
 import { Badge } from '@/components/ui/badge'
@@ -56,6 +58,7 @@ import {
   ListSkeleton,
   PageHeader,
 } from '@/components/common'
+import { SsoErrorAlert, ssoHref } from '@/components/sso'
 
 const profileSchema = z.object({
   displayName: z.string().min(1, 'Enter a display name'),
@@ -118,7 +121,7 @@ function ProfileCard() {
 
 const pwSchema = z
   .object({
-    currentPassword: z.string().min(1, 'Enter your current password'),
+    currentPassword: z.string().optional(),
     newPassword: z.string().min(8, 'At least 8 characters'),
     confirm: z.string(),
   })
@@ -128,7 +131,7 @@ const pwSchema = z
   })
 type PwValues = z.infer<typeof pwSchema>
 
-function PasswordCard() {
+function PasswordCard({ hasPassword }: { hasPassword: boolean }) {
   const change = useChangePassword()
   const {
     register,
@@ -141,37 +144,50 @@ function PasswordCard() {
     <Card>
       <CardHeader>
         <CardTitle>Password</CardTitle>
-        <CardDescription>Choose a new password for this account.</CardDescription>
+        <CardDescription>
+          {hasPassword
+            ? 'Choose a new password for this account.'
+            : 'This account signs in through single sign-on. Set a password to also log in without it.'}
+        </CardDescription>
       </CardHeader>
       <form
         noValidate
-        onSubmit={handleSubmit((v) =>
+        onSubmit={handleSubmit((v) => {
+          if (hasPassword && !v.currentPassword) {
+            setError('currentPassword', { message: 'Enter your current password' })
+            return
+          }
           change.mutate(
-            { currentPassword: v.currentPassword, newPassword: v.newPassword },
+            {
+              ...(hasPassword ? { currentPassword: v.currentPassword } : {}),
+              newPassword: v.newPassword,
+            },
             {
               onSuccess: () => {
-                toast.success('Password changed')
+                toast.success(hasPassword ? 'Password changed' : 'Password set')
                 reset()
               },
               onError: (e) => applyServerError(e, setError),
             },
-          ),
-        )}
+          )
+        })}
       >
-        <CardContent className="grid gap-4 sm:grid-cols-3">
-          <Field
-            label="Current password"
-            htmlFor="currentPassword"
-            error={errors.currentPassword?.message}
-          >
-            <Input
-              id="currentPassword"
-              type="password"
-              autoComplete="current-password"
-              aria-invalid={!!errors.currentPassword}
-              {...register('currentPassword')}
-            />
-          </Field>
+        <CardContent className={`grid gap-4 ${hasPassword ? 'sm:grid-cols-3' : 'sm:grid-cols-2'}`}>
+          {hasPassword && (
+            <Field
+              label="Current password"
+              htmlFor="currentPassword"
+              error={errors.currentPassword?.message}
+            >
+              <Input
+                id="currentPassword"
+                type="password"
+                autoComplete="current-password"
+                aria-invalid={!!errors.currentPassword}
+                {...register('currentPassword')}
+              />
+            </Field>
+          )}
           <Field label="New password" htmlFor="newPassword" error={errors.newPassword?.message}>
             <Input
               id="newPassword"
@@ -193,10 +209,91 @@ function PasswordCard() {
         </CardContent>
         <CardFooter className="mt-6 justify-end">
           <Button type="submit" disabled={change.isPending}>
-            Change password
+            {hasPassword ? 'Change password' : 'Set password'}
           </Button>
         </CardFooter>
       </form>
+    </Card>
+  )
+}
+
+function IdentitiesCard() {
+  const { data: me } = useMe()
+  const setup = useSetup()
+  const unlink = useUnlinkIdentity()
+  const [toUnlink, setToUnlink] = useState<Identity | null>(null)
+  const identities = me?.identities ?? []
+  const linked = new Set(identities.map((i) => i.provider))
+  const connectable = (setup.data?.providers ?? []).filter((p) => !linked.has(p.id))
+  // Nothing to show or offer, so skip the card instead of rendering an empty one.
+  if (identities.length === 0 && connectable.length === 0) return null
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Sign-in methods</CardTitle>
+        <CardDescription>Single sign-on accounts connected to this gotero account.</CardDescription>
+      </CardHeader>
+      <CardContent className="grid gap-4">
+        {identities.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No providers connected yet.</p>
+        ) : (
+          <ul className="divide-y rounded-md border">
+            {identities.map((i) => (
+              <li key={i.provider} className="flex items-center gap-3 p-3">
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-medium">
+                    {i.providerName}{' '}
+                    <Badge variant="secondary" className="ml-1 uppercase">
+                      {i.kind}
+                    </Badge>
+                  </p>
+                  <p className="truncate text-xs text-muted-foreground">
+                    {i.email} - last login {relativeTime(i.lastLoginAt)}
+                  </p>
+                </div>
+                <Button variant="outline" size="sm" onClick={() => setToUnlink(i)}>
+                  <Unlink /> Unlink
+                </Button>
+              </li>
+            ))}
+          </ul>
+        )}
+        {connectable.length > 0 && (
+          <div className="flex flex-wrap gap-2">
+            {connectable.map((p) => (
+              <Button key={p.id} asChild variant="outline" size="sm">
+                <a href={ssoHref(p, { link: '1' })}>Connect {p.displayName}</a>
+              </Button>
+            ))}
+          </div>
+        )}
+      </CardContent>
+      <ConfirmDialog
+        open={!!toUnlink}
+        onOpenChange={(o) => !o && setToUnlink(null)}
+        title="Unlink sign-in method?"
+        description={
+          <>
+            You will no longer be able to log in with <strong>{toUnlink?.providerName}</strong>.
+          </>
+        }
+        confirmLabel="Unlink"
+        pending={unlink.isPending}
+        onConfirm={() =>
+          toUnlink &&
+          unlink.mutate(toUnlink.provider, {
+            onSuccess: () => {
+              toast.success('Sign-in method unlinked')
+              setToUnlink(null)
+            },
+            onError: (e) => {
+              // Typically 409 last_login_method; the server message explains why.
+              toast.error(errorMessage(e))
+              setToUnlink(null)
+            },
+          })
+        }
+      />
     </Card>
   )
 }
@@ -500,6 +597,10 @@ function GroupsCard() {
 
 export default function AccountPage() {
   const { data: me } = useMe()
+  const setup = useSetup()
+  const { error } = useSearch({ from: '/app/account' })
+  // Wait for /setup so the card does not flash in for non-admins when local login is off.
+  const showPassword = !!me && !!setup.data && (setup.data.localLogin || me.isAdmin)
   return (
     <>
       <PageHeader
@@ -507,8 +608,10 @@ export default function AccountPage() {
         description={me ? `Member since ${formatDate(me.createdAt)}` : undefined}
       />
       <div className="grid gap-6">
+        <SsoErrorAlert code={error} />
         <ProfileCard />
-        <PasswordCard />
+        <IdentitiesCard />
+        {showPassword && <PasswordCard hasPassword={me.hasPassword} />}
         <KeysCard />
         <GroupsCard />
       </div>

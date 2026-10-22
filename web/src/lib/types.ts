@@ -11,8 +11,24 @@ export type User = {
   usedBytes: number
   createdAt: string
   lastSyncAt: string | null
+  hasPassword: boolean
+  providers: string[]
 }
-export type Me = User & { csrfToken: string }
+export type Identity = {
+  provider: string
+  providerName: string
+  kind: 'oidc' | 'saml'
+  email: string
+  createdAt: string
+  lastLoginAt: string | null
+}
+export type SsoProvider = {
+  id: string
+  kind: 'oidc' | 'saml'
+  displayName: string
+  startUrl: string
+}
+export type Me = User & { csrfToken: string; identities: Identity[] }
 
 export type ApiKeyAccess = {
   library: boolean
@@ -117,7 +133,13 @@ export type ImportJob = {
   finishedAt: string | null
 }
 
-export type Setup = { openRegistration: boolean; publicUrl: string; version: string }
+export type Setup = {
+  openRegistration: boolean
+  publicUrl: string
+  version: string
+  localLogin: boolean
+  providers: SsoProvider[]
+}
 export type AdminSettings = { openRegistration: boolean; defaultQuotaBytes: number | null }
 export type GcResult = { orphanBlobs: number; orphanBytes: number; deleted: boolean }
 export type Page<T> = { items: T[]; nextCursor: string | null }
