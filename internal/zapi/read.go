@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/robertjndw/gotero/internal/httpx"
 	"github.com/robertjndw/gotero/internal/repo"
 	"github.com/robertjndw/gotero/zotero"
 )
@@ -45,9 +46,12 @@ const (
 
 // listParams are the query parameters shared by every listing.
 type listParams struct {
-	format  string
-	since   int64
-	keys    []string
+	format string
+	since  int64
+	keys   []string
+	// noMatch is set when a key list was given but held only malformed keys.
+	// keys stays empty then, which would otherwise read as "no filter".
+	noMatch bool
 	limit   int // 0 means unlimited
 	start   int
 	sort    string
@@ -82,7 +86,9 @@ func parseListParams(c *gin.Context, t repo.ObjectType) (listParams, error) {
 	p.since = since
 	if s := c.Query(zotero.ObjectType(t).KeyParam()); s != "" {
 		keys, err := zotero.ParseKeyListMax(s, zotero.MaxKeyList)
-		if err != nil {
+		if errors.Is(err, zotero.ErrNoValidKeys) {
+			p.noMatch = true
+		} else if err != nil {
 			return p, errStatus(http.StatusBadRequest, "Invalid "+zotero.ObjectType(t).KeyParam()+" value")
 		}
 		p.keys = keys
@@ -188,6 +194,10 @@ func (a *API) listObjects(t repo.ObjectType, sc scope) gin.HandlerFunc {
 			p.sort = "dateModified"
 			p.desc = p.desc || !c.Request.URL.Query().Has("direction")
 		}
+		if p.noMatch {
+			a.writeNoMatch(c, p)
+			return
+		}
 		q := listQuery(t, p, sc, scopeKey)
 		// Filtered in SQL so Total-Results, paging and counts agree with
 		// what the key may actually see.
@@ -199,6 +209,20 @@ func (a *API) listObjects(t repo.ObjectType, sc scope) gin.HandlerFunc {
 		default:
 			a.writeObjects(c, l, q, p, t)
 		}
+	}
+}
+
+// writeNoMatch answers a key filter that named nothing valid: an empty
+// listing in the requested format, not the whole library.
+func (a *API) writeNoMatch(c *gin.Context, p listParams) {
+	c.Header("Total-Results", "0")
+	switch p.format {
+	case "versions":
+		c.Data(http.StatusOK, "application/json", []byte("{}"))
+	case "keys":
+		c.Data(http.StatusOK, "text/plain; charset=UTF-8", nil)
+	default:
+		c.Data(http.StatusOK, "application/json", []byte("[]"))
 	}
 }
 
@@ -222,7 +246,11 @@ func (a *API) streamVersions(c *gin.Context, l *LibraryContext, q repo.ListQuery
 	}
 	c.Status(http.StatusOK)
 
-	w := bufio.NewWriterSize(c.Writer, 64<<10)
+	// A client that stops reading must not hold the cursor (and its pool
+	// connection) open indefinitely.
+	dw := httpx.NewDeadlineWriter(c.Writer, a.writeIdle)
+	defer dw.Release()
+	w := bufio.NewWriterSize(dw, 64<<10)
 	flushed := false
 	if !asKeys {
 		_ = w.WriteByte('{')
@@ -259,7 +287,11 @@ func (a *API) streamVersions(c *gin.Context, l *LibraryContext, q repo.ListQuery
 		if w.Available() < len(buf) && w.Buffered() > 0 {
 			flushed = true
 		}
-		_, _ = w.Write(buf)
+		if _, err := w.Write(buf); err != nil {
+			// The client is gone or stalled past the deadline; leaving the
+			// loop closes the cursor.
+			return
+		}
 		written++
 	}
 	if !asKeys {

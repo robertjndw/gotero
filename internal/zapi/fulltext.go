@@ -87,15 +87,39 @@ func (f fulltextBody) sameAs(cur repo.Fulltext) bool {
 }
 
 // unchangedFulltext reports whether the item already has exactly this text.
-func unchangedFulltext(ctx context.Context, tx repo.LibraryReader, key string, in fulltextBody) (bool, error) {
+// It also returns the stored version, which the batch response reports.
+func unchangedFulltext(ctx context.Context, tx repo.LibraryReader, key string, in fulltextBody) (int64, bool, error) {
 	cur, err := tx.Fulltext(ctx, key)
 	if errors.Is(err, repo.ErrNotFound) {
-		return false, nil
+		return 0, false, nil
 	}
 	if err != nil {
-		return false, err
+		return 0, false, err
 	}
-	return in.sameAs(cur), nil
+	return cur.Version, in.sameAs(cur), nil
+}
+
+// fulltextWriteResponse is the body of POST fulltext. Unlike object writes,
+// the client's full-text engine reads .key from every entry of both
+// successful and unchanged, so unchanged holds objects, not bare keys.
+type fulltextWriteResponse struct {
+	Successful map[string]json.RawMessage     `json:"successful"`
+	Success    map[string]string              `json:"success"`
+	Unchanged  map[string]json.RawMessage     `json:"unchanged"`
+	Failed     map[string]zotero.WriteFailure `json:"failed"`
+}
+
+func newFulltextWriteResponse() *fulltextWriteResponse {
+	return &fulltextWriteResponse{
+		Successful: map[string]json.RawMessage{},
+		Success:    map[string]string{},
+		Unchanged:  map[string]json.RawMessage{},
+		Failed:     map[string]zotero.WriteFailure{},
+	}
+}
+
+func fulltextEntry(key string, ver int64) json.RawMessage {
+	return json.RawMessage(fmt.Sprintf(`{"key":%q,"version":%d}`, key, ver))
 }
 
 func (f fulltextBody) valid() bool {
@@ -146,7 +170,7 @@ func (a *API) putFulltext(c *gin.Context) {
 		if _, ok := found[key]; !ok {
 			return &httpError{status: http.StatusNotFound, version: tx.Version(), msg: "Item not found"}
 		}
-		if same, err := unchangedFulltext(ctx, tx, key, in); err != nil || same {
+		if _, same, err := unchangedFulltext(ctx, tx, key, in); err != nil || same {
 			return err
 		}
 		ver, err := tx.NextVersion(ctx)
@@ -181,7 +205,7 @@ func (a *API) postFulltext(c *gin.Context) {
 		return
 	}
 	ctx := c.Request.Context()
-	resp := zotero.NewWriteResponse()
+	resp := newFulltextWriteResponse()
 	var before int64
 	v, err := a.store.InLibrary(ctx, l.LibraryID, func(tx repo.LibraryTx) error {
 		before = tx.Version()
@@ -220,12 +244,12 @@ func (a *API) postFulltext(c *gin.Context) {
 				}
 				continue
 			}
-			same, err := unchangedFulltext(ctx, tx, it.in.Key, it.in)
+			curVer, same, err := unchangedFulltext(ctx, tx, it.in.Key, it.in)
 			if err != nil {
 				return err
 			}
 			if same {
-				resp.Unchanged[strconv.Itoa(it.idx)] = it.in.Key
+				resp.Unchanged[strconv.Itoa(it.idx)] = fulltextEntry(it.in.Key, curVer)
 				continue
 			}
 			puts = append(puts, it)
@@ -242,7 +266,7 @@ func (a *API) postFulltext(c *gin.Context) {
 			fts[i] = it.in.toRepo(it.in.Key, ver)
 			idx := strconv.Itoa(it.idx)
 			resp.Success[idx] = it.in.Key
-			resp.Successful[idx] = json.RawMessage(fmt.Sprintf(`{"key":%q,"version":%d}`, it.in.Key, ver))
+			resp.Successful[idx] = fulltextEntry(it.in.Key, ver)
 		}
 		return tx.PutFulltext(ctx, fts)
 	})

@@ -53,14 +53,19 @@ type planOpts struct {
 	DenyNotes bool
 	// NewKey generates a key for objects that came without one.
 	NewKey func() string
+	// Group is set for group libraries, which refuse user-only fields.
+	Group bool
 }
 
 type entry struct {
 	idx     int
 	key     string
 	version int64
-	patch   zotero.OrderedMap
-	fail    *writeError
+	// hasVersion tells an explicit "version": 0 from an absent version. On an
+	// existing object the first is a stale write, the second a blind overwrite.
+	hasVersion bool
+	patch      zotero.OrderedMap
+	fail       *writeError
 }
 
 func failedOutcome(e entry, werr *writeError) outcome {
@@ -119,7 +124,7 @@ func parseEntries(raws []json.RawMessage, opts planOpts) []entry {
 				out[i] = e
 				continue
 			}
-			e.version = v
+			e.version, e.hasVersion = v, true
 		}
 		if seen[e.key] {
 			e.fail = conflict("Object appears more than once in the request")
@@ -252,22 +257,16 @@ func planOne(opts planOpts, e entry, stored *repo.Object, refs refSets) outcome 
 		// even reveal its version.
 		return failedOutcome(e, errNotesDenied)
 	}
-	if e.version > 0 {
-		switch {
-		case stored == nil:
-			return failedOutcome(e, &writeError{
-				Code: http.StatusNotFound,
-				Msg:  label + " doesn't exist (it may have been deleted)",
-			})
-		case stored.Version != e.version:
-			return failedOutcome(e, &writeError{
-				Code: http.StatusPreconditionFailed,
-				Msg: fmt.Sprintf("%s has been modified since specified version (expected %d, found %d)",
-					label, e.version, stored.Version),
-			})
-		}
+	if stored == nil && e.version > 0 {
+		return failedOutcome(e, &writeError{
+			Code: http.StatusNotFound,
+			Msg:  label + " doesn't exist (it may have been deleted)",
+		})
 	}
-
+	// Only a stored version newer than the client's counts as a conflict. A
+	// client that is ahead of us (say after a restore) is let through, the
+	// same way library versions are treated.
+	stale := stored != nil && e.hasVersion && stored.Version > e.version
 	var (
 		data    zotero.OrderedMap
 		changed bool
@@ -283,10 +282,20 @@ func planOne(opts planOpts, e entry, stored *repo.Object, refs refSets) outcome 
 	default:
 		werr = badRequest("Unsupported object type")
 	}
-	if werr != nil {
+	switch {
+	// A "version": 0 on an existing object is most often a create retried
+	// after its response was lost. The client turns a 412 into a full
+	// library resync, so when the content already matches we report it as
+	// unchanged instead; anything else still conflicts.
+	case stale && (e.version != 0 || werr != nil || changed):
+		return failedOutcome(e, &writeError{
+			Code: http.StatusPreconditionFailed,
+			Msg: fmt.Sprintf("%s has been modified since specified version (expected %d, found %d)",
+				label, e.version, stored.Version),
+		})
+	case werr != nil:
 		return failedOutcome(e, werr)
-	}
-	if !changed {
+	case !changed:
 		return outcome{Index: e.idx, Key: e.key, Status: outUnchanged}
 	}
 	obj, err := ObjectFromData(opts.Kind, e.key, data)
@@ -413,10 +422,9 @@ func buildItem(opts planOpts, e entry, stored *repo.Object, refs refSets) (zoter
 	if werr := normalizeDeleted(&p); werr != nil {
 		return base, false, werr
 	}
-	if raw, ok := p.patch.Get("relations"); ok && string(bytes.TrimSpace(raw)) == "[]" {
-		p.patch.Set("relations", json.RawMessage("{}"))
-	}
+	emptyArrayToObject(p.patch, "relations")
 	nullToEmpty(p.patch, map[string]string{"tags": "[]", "collections": "[]", "creators": "[]", "relations": "{}"})
+	dropEmptyTags(&p.patch)
 	// dateAdded never changes after creation, whatever the client sends.
 	if stored != nil {
 		p.patch.Delete("dateAdded")
@@ -431,6 +439,12 @@ func buildItem(opts planOpts, e entry, stored *repo.Object, refs refSets) (zoter
 	}
 	if werr := validateItemPatch(opts.Schema, itemType, p.patch); werr != nil {
 		return base, false, werr
+	}
+	if itemType == "attachment" {
+		if werr := checkAttachmentExtras(opts.Group, p); werr != nil {
+			return base, false, werr
+		}
+		normalizeAttachmentExtras(&p)
 	}
 	if opts.DenyNotes && (itemType == "note" || stringField(p.base, "itemType") == "note") {
 		return base, false, errNotesDenied
@@ -504,6 +518,14 @@ func nullToEmpty(m zotero.OrderedMap, empties map[string]string) {
 	}
 }
 
+// emptyArrayToObject turns an empty JSON array into {}. PHP clients encode an
+// empty map as [], and zotero.org takes it for an empty object.
+func emptyArrayToObject(m zotero.OrderedMap, name string) {
+	if raw, ok := m.Get(name); ok && string(bytes.TrimSpace(raw)) == "[]" {
+		m.Set(name, json.RawMessage("{}"))
+	}
+}
+
 // normalizeDeleted handles the trash flag, which items, collections and
 // searches all carry since Zotero 7. Like zotero.org, it is stored as 1 when
 // set and absent otherwise.
@@ -539,6 +561,7 @@ func buildCollection(opts planOpts, e entry, stored *repo.Object, refs refSets) 
 		return base, false, werr
 	}
 	nullToEmpty(p.patch, map[string]string{"relations": "{}"})
+	emptyArrayToObject(p.patch, "relations")
 	if werr := validateCollectionPatch(e.key, p.patch); werr != nil {
 		return base, false, werr
 	}

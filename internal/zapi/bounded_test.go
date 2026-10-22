@@ -99,10 +99,11 @@ func TestObjectBodyKeyLimits(t *testing.T) {
 	r := e.do(t, req{method: "PATCH", path: l.path + "/items/" + key, key: l.key, raw: []byte(sb.String())})
 	assert.Equal(t, 413, r.Status, string(r.Body))
 
-	// Settings: too many keys, and one oversized value.
+	// Settings: too many keys (the limit is 270, not the 50 of objects), and
+	// one oversized value.
 	sb.Reset()
 	sb.WriteString("{")
-	for i := 0; i < 51; i++ {
+	for i := 0; i < 270; i++ {
 		fmt.Fprintf(&sb, `"s%d":{"value":1},`, i)
 	}
 	sb.WriteString(`"last":{"value":1}}`)

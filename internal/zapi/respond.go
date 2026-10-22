@@ -3,6 +3,7 @@ package zapi
 import (
 	"context"
 	"errors"
+	"math/rand/v2"
 	"net/http"
 	"strconv"
 
@@ -47,18 +48,24 @@ func (a *API) FailErr(c *gin.Context, err error) {
 		Fail(c, he.status, he.msg)
 	case httpx.IsTooLarge(err):
 		Fail(c, http.StatusRequestEntityTooLarge, "Request body too large")
-	case errors.Is(err, repo.ErrBusy):
-		c.Header("Retry-After", "5")
-		Fail(c, http.StatusServiceUnavailable, "Library is busy, try again shortly")
 	case errors.Is(c.Request.Context().Err(), context.Canceled):
-		// The client went away; there is nobody to answer.
+		// The client went away; there is nobody to answer. This has to come
+		// before the busy case: an aborted query can surface as a database
+		// error that maps to ErrBusy.
 		c.Abort()
+	case errors.Is(err, repo.ErrBusy):
+		c.Header("Retry-After", strconv.Itoa(retryAfterSeconds()))
+		Fail(c, http.StatusServiceUnavailable, "Library is busy, try again shortly")
 	default:
 		a.log.ErrorContext(c.Request.Context(), "zapi: request failed", "method", c.Request.Method,
 			"path", c.Request.URL.Path, "err", err)
 		Fail(c, http.StatusInternalServerError, "Internal server error")
 	}
 }
+
+// retryAfterSeconds is jittered so clients that were all turned away at once
+// do not come back in lockstep.
+func retryAfterSeconds() int { return 3 + rand.IntN(6) } //nolint:gosec // jitter, not a security control
 
 func setVersion(c *gin.Context, v int64) {
 	c.Header("Last-Modified-Version", strconv.FormatInt(v, 10))

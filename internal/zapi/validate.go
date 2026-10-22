@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/robertjndw/gotero/zotero"
@@ -32,7 +33,7 @@ func conflict(format string, args ...any) *writeError {
 var childItemTypes = map[string]bool{"note": true, "attachment": true, "annotation": true}
 
 var (
-	attachmentExtraFields = []string{"linkMode", "contentType", "charset", "filename", "md5", "mtime", "note"}
+	attachmentExtraFields = []string{"linkMode", "contentType", "charset", "filename", "md5", "mtime", "path", "lastRead", "note"}
 	annotationExtraFields = []string{
 		"annotationType", "annotationAuthorName", "annotationText", "annotationComment",
 		"annotationColor", "annotationPageLabel", "annotationSortIndex", "annotationPosition",
@@ -176,9 +177,23 @@ func validateItemField(s *schema.Schema, itemType, name string, raw json.RawMess
 			return badRequest("'md5' must be a string or null")
 		}
 	case "mtime":
+		// "" is what some clients send for "no mtime"; it is ignored later.
 		var m *int64
-		if err := json.Unmarshal(raw, &m); err != nil {
+		if err := json.Unmarshal(raw, &m); err != nil && string(bytes.TrimSpace(raw)) != `""` {
 			return badRequest("'mtime' must be an integer or null")
+		}
+	case "lastRead":
+		if isClearedLastRead(raw) {
+			return nil // null, "" and false clear it
+		}
+		var n int64
+		if err := json.Unmarshal(raw, &n); err != nil || n < 0 {
+			return badRequest("'lastRead' must be an integer")
+		}
+	case "path":
+		var v string
+		if err := json.Unmarshal(raw, &v); err != nil {
+			return badRequest("'path' must be a string")
 		}
 	default:
 		if !isScalar(raw) {
@@ -197,7 +212,7 @@ func validateTags(raw json.RawMessage) *writeError {
 		return badRequest("'tags' must be an array of {tag, type} objects")
 	}
 	for _, t := range tags {
-		if t.Tag == nil || *t.Tag == "" {
+		if t.Tag == nil {
 			return badRequest("Tag cannot be empty")
 		}
 		if t.Type != nil && *t.Type != 0 && *t.Type != 1 {
@@ -269,4 +284,90 @@ func validateSearchPatch(patch zotero.OrderedMap) *writeError {
 		return werr == nil
 	})
 	return werr
+}
+
+// dropEmptyTags removes tags whose name is empty or only whitespace. Zotero
+// can produce them and zotero.org skips them instead of failing the item.
+// A tag object without a "tag" member is still left for validateTags.
+func dropEmptyTags(patch *zotero.OrderedMap) {
+	raw, ok := patch.Get("tags")
+	if !ok {
+		return
+	}
+	var tags []json.RawMessage
+	if json.Unmarshal(raw, &tags) != nil {
+		return
+	}
+	kept := tags[:0:0]
+	for _, t := range tags {
+		var v struct {
+			Tag *string `json:"tag"`
+		}
+		if json.Unmarshal(t, &v) == nil && v.Tag != nil && strings.TrimSpace(*v.Tag) == "" {
+			continue
+		}
+		kept = append(kept, t)
+	}
+	if len(kept) == len(tags) {
+		return // leave the bytes alone so unchanged detection sees them as sent
+	}
+	if b, err := json.Marshal(kept); err == nil {
+		patch.Set("tags", b)
+	}
+}
+
+// checkAttachmentExtras covers the attachment fields whose validity depends
+// on more than their own value: where the library lives and the link mode.
+func checkAttachmentExtras(group bool, p prepared) *writeError {
+	// Clearing is harmless anywhere; only a real value is user-library only.
+	if raw, ok := p.patch.Get("lastRead"); ok && group && !isClearedLastRead(raw) {
+		return badRequest("lastRead can only be set in user libraries")
+	}
+	if !p.patch.Has("path") {
+		return nil
+	}
+	mode := stringField(p.patch, "linkMode")
+	if mode == "" {
+		mode = stringField(p.base, "linkMode")
+	}
+	if mode != "linked_file" {
+		return badRequest("'path' can only be set on linked_file attachments")
+	}
+	if group {
+		return badRequest("Linked files can only be added to user libraries")
+	}
+	return nil
+}
+
+// normalizeAttachmentExtras settles the values clients send to mean "none".
+// lastRead disappears when cleared, like parentItem. md5 and mtime are
+// server-managed once a file was uploaded, so a null or "" from a client that
+// doesn't know about the file must not wipe them; when nothing is stored yet,
+// "" becomes null so the field never holds an empty string.
+func normalizeAttachmentExtras(p *prepared) {
+	if raw, ok := p.patch.Get("lastRead"); ok && isClearedLastRead(raw) {
+		p.patch.Delete("lastRead")
+		p.removed = p.base.Delete("lastRead") || p.removed
+	}
+	for _, k := range []string{"md5", "mtime"} {
+		raw, ok := p.patch.Get(k)
+		if !ok {
+			continue
+		}
+		sent := string(bytes.TrimSpace(raw))
+		if sent != "null" && sent != `""` {
+			continue
+		}
+		if cur, has := p.base.Get(k); has && string(bytes.TrimSpace(cur)) != "null" {
+			p.patch.Delete(k)
+		} else if sent == `""` {
+			p.patch.Set(k, json.RawMessage("null"))
+		}
+	}
+}
+
+// isClearedLastRead reports the values that clear lastRead. 0 is excluded:
+// it is a real (if odd) timestamp.
+func isClearedLastRead(raw json.RawMessage) bool {
+	return isFalsy(raw) && string(bytes.TrimSpace(raw)) != "0"
 }

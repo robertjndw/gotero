@@ -74,6 +74,14 @@ func (a *API) uploadTarget(c *gin.Context) {
 	case !tok.ExpiresAt.After(a.now()):
 		Fail(c, http.StatusForbidden, "Upload key has expired")
 		return
+	case tok.State == "uploaded" || tok.State == "registered":
+		// The client retries when it never saw our 201. The bytes are already
+		// stored, but the body is still drained: answering mid-upload makes
+		// the server close the connection, and a client that is still
+		// sending sees a reset instead of the 201.
+		_, _ = io.Copy(io.Discard, http.MaxBytesReader(c.Writer, c.Request.Body, tok.Size+multipartSlack))
+		c.Status(http.StatusCreated)
+		return
 	case tok.State != "pending":
 		Fail(c, http.StatusConflict, "Upload key has already been used")
 		return
@@ -99,7 +107,10 @@ func (a *API) uploadTarget(c *gin.Context) {
 	case err != nil:
 		a.FailErr(c, err)
 	default:
-		if err := a.store.Files().SetUploadTokenState(ctx, tok.UploadKey, "uploaded"); err != nil {
+		// Conditional, so a duplicate that finishes after the register call
+		// cannot move the token from registered back to uploaded. Not moving
+		// is fine: someone else already got it there.
+		if _, err := a.store.Files().SetUploadTokenStateFrom(ctx, tok.UploadKey, "pending", "uploaded"); err != nil {
 			a.FailErr(c, err)
 			return
 		}
