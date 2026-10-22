@@ -11,6 +11,79 @@ import (
 	"time"
 )
 
+// deadlineRecorder is a ResponseWriter that records SetWriteDeadline calls.
+type deadlineRecorder struct {
+	*httptest.ResponseRecorder
+	deadlines []time.Time
+}
+
+func (r *deadlineRecorder) SetWriteDeadline(t time.Time) error {
+	r.deadlines = append(r.deadlines, t)
+	return nil
+}
+
+func TestDeadlineWriterExtendsAtMostOncePerSecond(t *testing.T) {
+	rec := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	dw := NewDeadlineWriter(rec, time.Minute)
+	if len(rec.deadlines) != 1 {
+		t.Fatalf("want the initial deadline armed, got %d calls", len(rec.deadlines))
+	}
+
+	for range 100 {
+		_, _ = dw.Write([]byte("x"))
+	}
+	if len(rec.deadlines) != 1 {
+		t.Fatalf("writes within a second must not touch the deadline, got %d calls", len(rec.deadlines))
+	}
+
+	dw.last = time.Now().Add(-2 * time.Second)
+	_, _ = dw.Write([]byte("x"))
+	if len(rec.deadlines) != 2 {
+		t.Fatalf("a write after a second must extend the deadline, got %d calls", len(rec.deadlines))
+	}
+	if got := time.Until(rec.deadlines[1]); got < 50*time.Second || got > time.Minute {
+		t.Fatalf("deadline should be about one idle period ahead, got %v", got)
+	}
+
+	dw.Release()
+	if last := rec.deadlines[len(rec.deadlines)-1]; !last.IsZero() {
+		t.Fatalf("Release must clear the deadline, got %v", last)
+	}
+}
+
+func TestDeadlineWriterCutsStalledReader(t *testing.T) {
+	done := make(chan error, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		dw := NewDeadlineWriter(w, 200*time.Millisecond)
+		defer dw.Release()
+		chunk := make([]byte, 1<<20)
+		for {
+			if _, err := dw.Write(chunk); err != nil {
+				done <- err
+				return
+			}
+		}
+	}))
+	defer srv.Close()
+
+	// Send the request, then never read the response.
+	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	_, _ = io.WriteString(conn, "GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected a write error")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("write to a stalled reader never timed out")
+	}
+}
+
 // slowPost sends headers and part of a body, then stalls.
 func slowPost(t *testing.T, addr, path string) (time.Duration, string) {
 	t.Helper()

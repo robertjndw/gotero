@@ -53,7 +53,14 @@ func (r *libReader) StorageUsed() int64    { return r.used }
 // Library returns an unlocked reader. The header values are read once here.
 func (s *Store) Library(ctx context.Context, libraryID int64) (repo.LibraryReader, error) {
 	r := &libReader{q: s.pool, id: libraryID}
-	err := s.pool.QueryRow(ctx,
+	// Every request starts here, so this is where a saturated pool should
+	// push back instead of queueing.
+	conn, err := s.acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Release()
+	err = conn.QueryRow(ctx,
 		`SELECT version, delete_log_floor, storage_used FROM libraries WHERE id = $1`, libraryID,
 	).Scan(&r.version, &r.floor, &r.used)
 	if err != nil {
@@ -119,25 +126,39 @@ func nonNil(s []string) []string {
 	return s
 }
 
-func (r *libReader) Deleted(ctx context.Context, since int64) (map[repo.ObjectType][]string, error) {
+// Deleted returns the log entries after since together with the delete log
+// floor. Both come from one statement, so a prune committing between two
+// reads cannot hand back a floor older than the entries it already removed.
+func (r *libReader) Deleted(ctx context.Context, since int64) (map[repo.ObjectType][]string, int64, error) {
 	rows, err := r.q.Query(ctx, `
-		SELECT object_type, array_agg(key ORDER BY key)
-		FROM deleted_log WHERE library_id = $1 AND version > $2
-		GROUP BY object_type`, r.id, since)
+		SELECT l.delete_log_floor, d.object_type, d.keys
+		FROM libraries l
+		LEFT JOIN (
+			SELECT object_type, array_agg(key ORDER BY key) AS keys
+			FROM deleted_log WHERE library_id = $1 AND version > $2
+			GROUP BY object_type
+		) d ON true
+		WHERE l.id = $1`, r.id, since)
 	if err != nil {
-		return nil, wrap("list deleted", err)
+		return nil, 0, wrap("list deleted", err)
 	}
 	defer rows.Close()
 	out := map[repo.ObjectType][]string{}
+	var floor int64
 	for rows.Next() {
-		var t string
+		var t *string
 		var keys []string
-		if err := rows.Scan(&t, &keys); err != nil {
-			return nil, wrap("list deleted", err)
+		if err := rows.Scan(&floor, &t, &keys); err != nil {
+			return nil, 0, wrap("list deleted", err)
 		}
-		out[repo.ObjectType(t)] = keys
+		if t != nil {
+			out[repo.ObjectType(*t)] = keys
+		}
 	}
-	return out, wrap("list deleted", rows.Err())
+	if err := rows.Err(); err != nil {
+		return nil, 0, wrap("list deleted", err)
+	}
+	return out, floor, nil
 }
 
 func (r *libReader) Settings(ctx context.Context, since int64) ([]repo.Setting, error) {
@@ -242,13 +263,19 @@ func (r *libReader) AttachmentFilesSize(ctx context.Context, itemKeys []string) 
 
 // InLibrary runs fn in a transaction that holds the library row lock.
 func (s *Store) InLibrary(ctx context.Context, libraryID int64, fn func(tx repo.LibraryTx) error) (int64, error) {
-	tx, err := s.pool.Begin(ctx)
+	conn, err := s.acquire(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer conn.Release()
+	tx, err := conn.Begin(ctx)
 	if err != nil {
 		return 0, wrap("begin", err)
 	}
-	// Rollback after a successful commit is a harmless no-op. Using a
-	// non-cancelable context means an aborted request still releases
-	// the lock instead of leaving the connection mid-transaction.
+	// Deferred after Release, so it runs first and the connection goes back
+	// to the pool clean. Rollback after a successful commit is a harmless
+	// no-op. Using a non-cancelable context means an aborted request still
+	// releases the lock instead of leaving the connection mid-transaction.
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 
 	lt := &libTx{libReader: libReader{q: tx, id: libraryID}}
@@ -274,7 +301,9 @@ func (s *Store) InLibrary(ctx context.Context, libraryID int64, fn func(tx repo.
 	if err := fn(lt); err != nil {
 		return 0, mapErr(err)
 	}
-	if err := tx.Commit(ctx); err != nil {
+	// A client that hangs up mid-commit must not turn a write that went
+	// through into an error: the version event would never be published.
+	if err := tx.Commit(context.WithoutCancel(ctx)); err != nil {
 		return 0, wrap("commit", err)
 	}
 	return lt.version, nil

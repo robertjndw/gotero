@@ -62,9 +62,13 @@ func (r fileRepo) GetUploadToken(ctx context.Context, uploadKey string) (repo.Up
 	return out, wrap("get upload token", err)
 }
 
-func (r fileRepo) SetUploadTokenState(ctx context.Context, uploadKey, state string) error {
-	tag, err := r.pool.Exec(ctx, `UPDATE upload_tokens SET state = $2 WHERE upload_key = $1`, uploadKey, state)
-	return requireRow(tag, err, "set upload token state")
+func (r fileRepo) SetUploadTokenStateFrom(ctx context.Context, uploadKey, from, to string) (bool, error) {
+	tag, err := r.pool.Exec(ctx,
+		`UPDATE upload_tokens SET state = $3 WHERE upload_key = $1 AND state = $2`, uploadKey, from, to)
+	if err != nil {
+		return false, wrap("set upload token state", err)
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 // OrphanBlobs uses the database clock for token expiry on purpose: it is the

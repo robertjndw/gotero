@@ -16,9 +16,6 @@ import (
 
 // Defaults chosen so maintenance is invisible under normal use.
 const (
-	// KeepDeleted is how long delete-log entries are kept. A client that has
-	// not synced for longer gets a 409 and does a full sync, which is safe.
-	KeepDeleted = 180 * 24 * time.Hour
 	// OrphanGrace protects files that were just uploaded but whose
 	// registration is still in flight or about to be retried.
 	OrphanGrace = 24 * time.Hour
@@ -41,14 +38,17 @@ type Runner struct {
 	files *files.Service
 	log   *slog.Logger
 	now   func() time.Time
+	// keepDeleted is the delete-log retention; 0 keeps the log forever.
+	keepDeleted time.Duration
 
 	// gcMu keeps a manual GC from the admin UI and the scheduled one from
 	// running at the same time.
 	gcMu sync.Mutex
 }
 
-func New(store repo.Store, files *files.Service, log *slog.Logger) *Runner {
-	return &Runner{store: store, files: files, log: log, now: time.Now}
+// New builds a Runner. keepDeleted <= 0 never prunes the delete log.
+func New(store repo.Store, files *files.Service, log *slog.Logger, keepDeleted time.Duration) *Runner {
+	return &Runner{store: store, files: files, log: log, now: time.Now, keepDeleted: max(keepDeleted, 0)}
 }
 
 // Run blocks until ctx is cancelled.
@@ -81,9 +81,10 @@ func (r *Runner) Run(ctx context.Context) {
 	wg.Wait()
 }
 
-// Prune removes expired sessions, tokens and old delete-log entries.
+// Prune removes expired sessions and tokens, and delete-log entries older
+// than the configured retention when there is one.
 func (r *Runner) Prune(ctx context.Context) error {
-	n, err := r.store.Prune(ctx, r.now(), KeepDeleted)
+	n, err := r.store.Prune(ctx, r.now(), r.keepDeleted)
 	if err != nil {
 		return err
 	}
