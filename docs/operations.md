@@ -56,6 +56,8 @@ gotero runs these jobs by itself:
 
 - Passwords are hashed with Argon2id, and API keys, session IDs and invite tokens are stored only as hashes.
 - Admin UI sessions use HttpOnly, SameSite cookies with CSRF tokens and an Origin check.
+- Single sign-on uses PKCE and a nonce for OIDC and checks signature, audience and request ID for SAML. Each sign-in attempt is single-use and bound to the browser that started it, and the identity provider can never grant admin rights.
+- If SSO breaks and you are locked out, admins can always sign in with their password, even with `GOTERO_LOCAL_LOGIN=false`. Reset a lost admin password with `gotero user passwd`.
 - Password logins (web UI and Zotero's older username/password sign-in) share one limit: 10 attempts per username and address, and 50 per address, every 15 minutes. Someone guessing from elsewhere cannot lock you out. Behind a reverse proxy, set `GOTERO_TRUSTED_PROXIES` so the limits see real client addresses.
 - Request bodies must arrive promptly, and stalled uploads are cut off after a minute without progress.
 - File download links are signed, tied to the exact file version, and expire after 5 minutes.
