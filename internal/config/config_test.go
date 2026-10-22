@@ -54,3 +54,80 @@ func TestPublicURLTrailingSlashTrimmed(t *testing.T) {
 		t.Fatalf("got %q", c.PublicURL)
 	}
 }
+
+func TestSSOProviders(t *testing.T) {
+	c, err := load(t, map[string]string{
+		"GOTERO_SECRET":                   strings.Repeat("x", 32),
+		"GOTERO_PUBLIC_URL":               "https://zotero.example.org",
+		"GOTERO_LOCAL_LOGIN":              "false",
+		"GOTERO_OIDC_PROVIDERS":           "corp,google",
+		"GOTERO_OIDC_CORP_ISSUER":         "https://idp.example.org",
+		"GOTERO_OIDC_CORP_CLIENT_ID":      "gotero",
+		"GOTERO_OIDC_CORP_DISPLAY_NAME":   "Corp SSO",
+		"GOTERO_OIDC_CORP_AUTO_PROVISION": "true",
+		"GOTERO_OIDC_GOOGLE_ISSUER":       "https://accounts.google.com",
+		"GOTERO_OIDC_GOOGLE_CLIENT_ID":    "abc",
+		"GOTERO_OIDC_GOOGLE_SCOPES":       "email,profile",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.LocalLogin || len(c.OIDC) != 2 || !c.SSOEnabled() {
+		t.Fatalf("unexpected config: %+v", c)
+	}
+	corp, google := c.OIDC[0], c.OIDC[1]
+	if corp.Name != "corp" || corp.DisplayName != "Corp SSO" || !corp.AutoProvision || corp.UsernameClaim != "preferred_username" {
+		t.Fatalf("corp: %+v", corp)
+	}
+	if google.DisplayName != "google" || google.Scopes[0] != "openid" || len(google.Scopes) != 3 {
+		t.Fatalf("google: %+v", google)
+	}
+}
+
+func TestSSOValidation(t *testing.T) {
+	secret := strings.Repeat("x", 32)
+	oidc := func(extra map[string]string) map[string]string {
+		m := map[string]string{
+			"GOTERO_SECRET":              secret,
+			"GOTERO_PUBLIC_URL":          "https://zotero.example.org",
+			"GOTERO_OIDC_PROVIDERS":      "corp",
+			"GOTERO_OIDC_CORP_ISSUER":    "https://idp.example.org",
+			"GOTERO_OIDC_CORP_CLIENT_ID": "gotero",
+		}
+		for k, v := range extra {
+			m[k] = v
+		}
+		return m
+	}
+	if _, err := load(t, oidc(nil)); err != nil {
+		t.Fatalf("valid config rejected: %v", err)
+	}
+	cases := map[string]map[string]string{
+		"no providers, no local login": {"GOTERO_SECRET": secret, "GOTERO_LOCAL_LOGIN": "false"},
+		"missing public url":           oidc(map[string]string{"GOTERO_PUBLIC_URL": ""}),
+		"missing issuer":               oidc(map[string]string{"GOTERO_OIDC_CORP_ISSUER": ""}),
+		"bad name":                     oidc(map[string]string{"GOTERO_OIDC_PROVIDERS": "Corp-1"}),
+		"duplicate across kinds": oidc(map[string]string{
+			"GOTERO_SAML_PROVIDERS":             "corp",
+			"GOTERO_SAML_CORP_IDP_METADATA_URL": "https://idp.example.org/metadata",
+			"GOTERO_SAML_SP_CERT_FILE":          "config_test.go",
+			"GOTERO_SAML_SP_KEY_FILE":           "config_test.go",
+		}),
+		"saml without metadata": oidc(map[string]string{
+			"GOTERO_SAML_PROVIDERS":    "okta",
+			"GOTERO_SAML_SP_CERT_FILE": "config_test.go",
+			"GOTERO_SAML_SP_KEY_FILE":  "config_test.go",
+		}),
+		"saml without sp key": oidc(map[string]string{
+			"GOTERO_SAML_PROVIDERS":             "okta",
+			"GOTERO_SAML_OKTA_IDP_METADATA_URL": "https://idp.example.org/metadata",
+		}),
+	}
+	for name, vars := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := load(t, vars); err == nil {
+				t.Fatal("expected error")
+			}
+		})
+	}
+}
