@@ -54,6 +54,8 @@ func (s *Store) Groups() repo.GroupRepo               { return groupRepo{s.pool}
 func (s *Store) LoginSessions() repo.LoginSessionRepo { return loginSessionRepo{s.pool} }
 func (s *Store) WebSessions() repo.WebSessionRepo     { return webSessionRepo{s.pool} }
 func (s *Store) Invites() repo.InviteRepo             { return inviteRepo{s.pool} }
+func (s *Store) Identities() repo.IdentityRepo        { return identityRepo{s.pool} }
+func (s *Store) SSOStates() repo.SSOStateRepo         { return ssoStateRepo{s.pool} }
 func (s *Store) Settings() repo.InstanceSettingsRepo  { return instanceSettingsRepo{s.pool} }
 func (s *Store) Files() repo.FileRepo                 { return fileRepo{s.pool} }
 func (s *Store) Imports() repo.ImportRepo             { return importRepo{s.pool} }
@@ -140,6 +142,7 @@ func (s *Store) Prune(ctx context.Context, now time.Time, keepDeletedFor time.Du
 	stmts := []string{
 		`DELETE FROM login_sessions WHERE expires_at < $1`,
 		`DELETE FROM web_sessions WHERE expires_at < $1`,
+		`DELETE FROM sso_states WHERE expires_at < $1`,
 		// Registered tokens are kept until expiry only so a replayed register
 		// is recognized; after that nothing reads them.
 		`DELETE FROM upload_tokens WHERE expires_at < $1`,

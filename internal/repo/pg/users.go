@@ -61,16 +61,20 @@ func nullIfEmpty(s string) *string {
 }
 
 func (r userRepo) Create(ctx context.Context, u repo.User) (repo.User, error) {
-	return r.create(ctx, u, 0, time.Time{})
+	return r.create(ctx, u, nil, 0, time.Time{})
 }
 
 // CreateWithInvite claims the invite first inside the transaction. If the
 // username is taken the whole thing rolls back and the invite stays usable.
 func (r userRepo) CreateWithInvite(ctx context.Context, u repo.User, inviteID int64, at time.Time) (repo.User, error) {
-	return r.create(ctx, u, inviteID, at)
+	return r.create(ctx, u, nil, inviteID, at)
 }
 
-func (r userRepo) create(ctx context.Context, u repo.User, inviteID int64, at time.Time) (repo.User, error) {
+func (r userRepo) CreateExternal(ctx context.Context, u repo.User, ident repo.Identity, inviteID int64, at time.Time) (repo.User, error) {
+	return r.create(ctx, u, &ident, inviteID, at)
+}
+
+func (r userRepo) create(ctx context.Context, u repo.User, ident *repo.Identity, inviteID int64, at time.Time) (repo.User, error) {
 	var out repo.User
 	err := inTx(ctx, r.pool, func(tx pgx.Tx) error {
 		var libID int64
@@ -93,8 +97,20 @@ func (r userRepo) create(ctx context.Context, u repo.User, inviteID int64, at ti
 			return err
 		}
 		out, err = pgx.CollectOneRow(rows, pgx.RowToStructByPos[repo.User])
-		if err != nil || inviteID == 0 {
+		if err != nil {
 			return err
+		}
+		if ident != nil {
+			_, err := tx.Exec(ctx, `
+				INSERT INTO user_identities (user_id, provider, subject, email, last_login_at)
+				VALUES ($1, $2, $3, $4, $5)`,
+				out.ID, ident.Provider, ident.Subject, nullIfEmpty(ident.Email), at)
+			if err != nil {
+				return err
+			}
+		}
+		if inviteID == 0 {
+			return nil
 		}
 		tag, err := tx.Exec(ctx, `
 			UPDATE invites SET used_by = $2, used_at = $3
@@ -141,6 +157,10 @@ func (r userRepo) GetByUsername(ctx context.Context, username string) (repo.User
 }
 
 var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
+func (r userRepo) GetByEmail(ctx context.Context, email string) (repo.User, error) {
+	return r.one(ctx, `email = $1`, email)
+}
 
 func (r userRepo) List(ctx context.Context, q string, limit int, cursor int64) ([]repo.User, error) {
 	var lim *int
