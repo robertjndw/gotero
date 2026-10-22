@@ -26,7 +26,7 @@ func ctx() context.Context { return context.Background() }
 func newService(t *testing.T) (*accounts.Service, *pg.Store, *config.Config, *bytes.Buffer) {
 	t.Helper()
 	store := pg.New(pgtest.New(t))
-	cfg := &config.Config{Secret: strings.Repeat("s", 32)}
+	cfg := &config.Config{Secret: strings.Repeat("s", 32), LocalLogin: true}
 	logs := &bytes.Buffer{}
 	svc := accounts.New(store, auth.NewAuthenticator(store.Keys(), store.Users()), cfg,
 		slog.New(slog.NewTextHandler(logs, nil)))
@@ -290,7 +290,7 @@ func TestAdminGuards(t *testing.T) {
 
 func TestDisablingRevokesCachedKeysAndSessions(t *testing.T) {
 	store := pg.New(pgtest.New(t))
-	cfg := &config.Config{Secret: strings.Repeat("s", 32)}
+	cfg := &config.Config{Secret: strings.Repeat("s", 32), LocalLogin: true}
 	a := auth.NewAuthenticator(store.Keys(), store.Users())
 	svc := accounts.New(store, a, cfg, nil)
 	u, _ := svc.CreateUser(ctx(), accounts.CreateUserInput{Username: "dave", Password: "long-enough-pw"})
