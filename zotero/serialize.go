@@ -17,7 +17,11 @@ var (
 
 	// The attachment order is load-bearing: the desktop client breaks when
 	// "filename" shows up before "linkMode".
-	attachmentFields = []string{"linkMode", "title", "accessDate", "url", "note", "contentType", "charset", "filename", "md5", "mtime"}
+	attachmentFields = []string{"linkMode", "title", "accessDate", "url", "note", "contentType", "charset", "filename", "md5", "mtime", "path", "lastRead"}
+	// extraIntroduced is the schema version that brought fields the schema
+	// itself doesn't list (attachment extras), so older clients don't get them.
+	extraIntroduced = map[string]int{"lastRead": 42}
+
 	annotationFields = []string{
 		"annotationType", "annotationAuthorName", "annotationText", "annotationComment",
 		"annotationColor", "annotationPageLabel", "annotationSortIndex", "annotationPosition",
@@ -74,6 +78,9 @@ func planFor(s *schema.Schema, itemType string) *plan {
 	p.introduced = make([]int, len(p.order))
 	for i, f := range p.order {
 		p.introduced[i] = s.FieldIntroduced(itemType, f)
+		if p.introduced[i] == 0 {
+			p.introduced[i] = extraIntroduced[f]
+		}
 	}
 	// Item types come from client input; caching arbitrary strings would let
 	// a client grow this map without bound.
