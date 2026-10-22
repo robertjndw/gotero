@@ -19,12 +19,20 @@ var quirksTests = []testCase{
 	{"NullArrayFieldsBecomeEmpty", testQuirkNullArrays},
 	{"WrongTypedArrayFieldsRejected", testQuirkWrongTypes},
 	{"ItemTypeChangeDropsInvalidFields", testQuirkItemTypeChange},
+	{"AttachmentLastRead", testQuirkLastRead},
+	{"LastReadHiddenFromOldSchemas", testQuirkLastReadSchema},
+	{"LastReadRefusedInGroups", testQuirkLastReadGroup},
+	{"LinkedFilePath", testQuirkPath},
+	{"EmptyTagsAreDropped", testQuirkEmptyTags},
+	{"NullMD5AndMtimeKeepStoredValues", testQuirkKeepFileFields},
+	{"EmptyRelationsArrayAccepted", testQuirkEmptyRelations},
+	{"UnknownFieldStillFails", testQuirkUnknownField},
 }
 
 // Serialization order the client depends on (protocol-notes, Object JSON).
 var attachmentOrder = []string{
 	"key", "version", "parentItem", "itemType", "linkMode", "title", "accessDate", "url", "note",
-	"contentType", "charset", "filename", "md5", "mtime", "tags", "collections", "relations",
+	"contentType", "charset", "filename", "md5", "mtime", "path", "lastRead", "tags", "collections", "relations",
 	"dateAdded", "dateModified",
 }
 
@@ -205,5 +213,160 @@ func testQuirkItemTypeChange(t *testing.T, e *env) {
 	cs := at[[]any](t, d, "creators")
 	if len(cs) != 1 || at[string](t, cs[0].(obj), "creatorType") != "author" {
 		t.Errorf("creators = %v, want the creator moved to the primary type", cs)
+	}
+}
+
+func failCode(t *testing.T, res obj) int64 {
+	t.Helper()
+	if len(at[obj](t, res, "failed")) != 1 {
+		t.Fatalf("want one failure, got %v", res)
+	}
+	return atInt(t, res, "failed", "0", "code")
+}
+
+func testQuirkLastRead(t *testing.T, e *env) {
+	l := e.userLib(t)
+	a := attachmentItem("lr.pdf")
+	a["lastRead"] = 1700000000
+	key, _ := l.create(t, "items", a)
+	if got := atInt(t, l.item(t, key), "data", "lastRead"); got != 1700000000 {
+		t.Errorf("lastRead = %d", got)
+	}
+	for _, clear := range []any{nil, "", false} {
+		mustStatus(t, l.do(t, "PATCH", "items/"+key, withJSON(obj{"lastRead": 5})), 204)
+		v := l.version(t)
+		mustStatus(t, l.do(t, "PATCH", "items/"+key, withJSON(obj{"lastRead": clear}), withIfUnmodified(v)), 204)
+		if d := at[obj](t, l.item(t, key), "data"); has(d, "lastRead") {
+			t.Errorf("lastRead %#v did not clear it: %v", clear, d["lastRead"])
+		}
+	}
+	res := l.write(t, "items", []obj{{"key": key, "lastRead": "yesterday"}})
+	if c := failCode(t, res); c != 400 {
+		t.Errorf("non-integer lastRead: code %d, want 400", c)
+	}
+}
+
+// Clients older than schema 42 reject fields they don't know.
+func testQuirkLastReadSchema(t *testing.T, e *env) {
+	l := e.userLib(t)
+	a := attachmentItem("old.pdf")
+	a["lastRead"] = 1700000000
+	key, _ := l.create(t, "items", a)
+	r := l.get(t, "items/"+key, withHeader("Zotero-Schema-Version", "41"))
+	mustStatus(t, r, 200)
+	if has(at[obj](t, parseObj(t, r), "data"), "lastRead") {
+		t.Errorf("schema 41 client got lastRead: %s", r.Body)
+	}
+	r = l.get(t, "items/"+key, withHeader("Zotero-Schema-Version", "42"))
+	mustStatus(t, r, 200)
+	if !has(at[obj](t, parseObj(t, r), "data"), "lastRead") {
+		t.Errorf("schema 42 client lacks lastRead: %s", r.Body)
+	}
+	assertOrder(t, r.Body, attachmentOrder)
+}
+
+func testQuirkLastReadGroup(t *testing.T, e *env) {
+	f := e.groupFixture(t)
+	l := e.groupLib(f.g, f.admin)
+	a := attachmentItem("g.pdf")
+	a["lastRead"] = 5
+	res := l.write(t, "items", []obj{a})
+	if c := failCode(t, res); c != 400 {
+		t.Errorf("code = %d, want 400", c)
+	}
+	if m := at[string](t, res, "failed", "0", "message"); !strings.Contains(m, "user libraries") {
+		t.Errorf("message = %q", m)
+	}
+}
+
+func testQuirkPath(t *testing.T, e *env) {
+	l := e.userLib(t)
+	linked := obj{"itemType": "attachment", "linkMode": "linked_file", "title": "p", "path": "attachments:p.pdf"}
+	key, _ := l.create(t, "items", linked)
+	if got := at[string](t, l.item(t, key), "data", "path"); got != "attachments:p.pdf" {
+		t.Errorf("path = %q", got)
+	}
+	bad := attachmentItem("p.pdf")
+	bad["path"] = "/x/p.pdf"
+	if c := failCode(t, l.write(t, "items", []obj{bad})); c != 400 {
+		t.Errorf("path on imported_file: code %d, want 400", c)
+	}
+
+	f := e.groupFixture(t)
+	g := e.groupLib(f.g, f.admin)
+	res := g.write(t, "items", []obj{linked})
+	if c := failCode(t, res); c != 400 {
+		t.Errorf("path in a group: code %d, want 400", c)
+	}
+}
+
+// Zotero can produce empty tags; they are skipped, not failed.
+func testQuirkEmptyTags(t *testing.T, e *env) {
+	l := e.userLib(t)
+	key, v := l.create(t, "items", obj{"itemType": "book", "title": "t", "tags": []obj{{"tag": ""}, {"tag": "  "}, {"tag": "0"}, {"tag": "a"}}})
+	tags := at[[]any](t, l.item(t, key), "data", "tags")
+	if len(tags) != 2 {
+		t.Errorf("tags = %v, want 0 and a", tags)
+	}
+	res := l.write(t, "items", []obj{{"key": key, "version": v, "tags": []obj{{"tag": "0"}, {"tag": "a"}, {"tag": ""}}}})
+	if got := at[string](t, res, "unchanged", "0"); got != key {
+		t.Errorf("unchanged = %v, want %s", res["unchanged"], key)
+	}
+	res = l.write(t, "items", []obj{{"itemType": "book", "tags": []obj{{"tag": "a", "type": 2}}}})
+	if c := failCode(t, res); c != 400 {
+		t.Errorf("bad tag type: code %d, want 400", c)
+	}
+}
+
+// A client that doesn't know about the uploaded file sends null or "" for
+// md5 and mtime; that must not erase what the file upload recorded.
+func testQuirkKeepFileFields(t *testing.T, e *env) {
+	l := e.userLib(t)
+	key, _ := l.create(t, "items", attachmentItem("keep.pdf"))
+	l.uploadFile(t, key, newFileSpec("keep.pdf", []byte("keep "+randHex(8))))
+	before := at[obj](t, l.item(t, key), "data")
+	md5, mtime := before["md5"], before["mtime"]
+	if md5 == nil || mtime == nil {
+		t.Fatalf("upload did not set md5/mtime: %v", before)
+	}
+	for _, sent := range []any{nil, ""} {
+		v := l.version(t)
+		mustStatus(t, l.do(t, "PATCH", "items/"+key, withJSON(obj{"md5": sent, "mtime": sent}), withIfUnmodified(v)), 204)
+		d := at[obj](t, l.item(t, key), "data")
+		if d["md5"] != md5 || d["mtime"] != mtime {
+			t.Errorf("sent %#v: md5/mtime = %v/%v, want %v/%v", sent, d["md5"], d["mtime"], md5, mtime)
+		}
+	}
+	fresh, _ := l.create(t, "items", obj{"itemType": "attachment", "linkMode": "imported_file", "title": "n", "md5": "", "mtime": ""})
+	d := at[obj](t, l.item(t, fresh), "data")
+	if v, ok := d["md5"]; !ok || v != nil {
+		t.Errorf("md5 = %#v, want null", v)
+	}
+	if v, ok := d["mtime"]; !ok || v != nil {
+		t.Errorf("mtime = %#v, want null", v)
+	}
+}
+
+func testQuirkEmptyRelations(t *testing.T, e *env) {
+	l := e.userLib(t)
+	for _, typ := range []string{"items", "collections"} {
+		o := obj{"name": "r", "relations": []any{}}
+		if typ == "items" {
+			o = obj{"itemType": "book", "title": "r", "relations": []any{}}
+		}
+		key, _ := l.create(t, typ, o)
+		r := l.get(t, typ+"/"+key)
+		mustStatus(t, r, 200)
+		if rel, ok := at[obj](t, parseObj(t, r), "data")["relations"].(obj); !ok || len(rel) != 0 {
+			t.Errorf("%s relations = %s, want {}", typ, r.Body)
+		}
+	}
+}
+
+func testQuirkUnknownField(t *testing.T, e *env) {
+	l := e.userLib(t)
+	res := l.write(t, "items", []obj{{"itemType": "book", "bogus": "x"}})
+	if c := failCode(t, res); c != 400 {
+		t.Errorf("code = %d, want 400", c)
 	}
 }

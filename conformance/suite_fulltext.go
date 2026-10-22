@@ -95,6 +95,11 @@ func testFulltextIdentical(t *testing.T, e *env) {
 	if got := versionHeader(t, r); got != v {
 		t.Errorf("identical POST moved the library version %d -> %d", v, got)
 	}
+	// The client reads .key from every unchanged entry, so bare strings
+	// would break it.
+	if got := at[string](t, parseObj(t, r), "unchanged", "0", "key"); got != k {
+		t.Errorf("unchanged[0].key = %q, want %q", got, k)
+	}
 	if got := atInt(t, parseObj(t, l.get(t, "fulltext?since=0")), k); got != fv {
 		t.Errorf("fulltext version %d -> %d, want unchanged", fv, got)
 	}

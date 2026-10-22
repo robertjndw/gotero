@@ -13,6 +13,9 @@ var writeTests = []testCase{
 	{"PartialPatchKeepsOtherFields", testWritePartial},
 	{"StaleObjectVersionFails412", testWriteStaleObject},
 	{"MissingObjectWithVersionFails404", testWriteMissing404},
+	{"ExplicitVersionZeroOnExistingFails412", testWriteVersionZero},
+	{"ClientAheadOfObjectVersionAccepted", testWriteClientAhead},
+	{"MalformedKeysInKeyListAreIgnored", testWriteMalformedKeyList},
 	{"StaleLibraryVersionHeader412", testWriteStaleHeader},
 	{"CurrentLibraryVersionHeaderAccepted", testWriteCurrentHeader},
 	{"TooManyObjects413", testWriteTooMany},
@@ -350,4 +353,55 @@ func testWriteTrashCollSearch(t *testing.T, e *env) {
 			t.Errorf("%s: deleted = %v after restoring", c.typ, d)
 		}
 	}
+}
+
+func testWriteVersionZero(t *testing.T, e *env) {
+	l := e.userLib(t)
+	key, _ := l.create(t, "items", bookItem("z"))
+	res := l.write(t, "items", []obj{{"key": key, "version": 0, "title": "again"}})
+	if len(at[obj](t, res, "failed")) != 1 || atInt(t, res, "failed", "0", "code") != 412 {
+		t.Errorf("want failed[0] 412, got %v", res)
+	}
+	// Without a version the write is still a blind overwrite.
+	l.write(t, "items", []obj{{"key": key, "title": "blind"}})
+}
+
+func testWriteClientAhead(t *testing.T, e *env) {
+	l := e.userLib(t)
+	key, v := l.create(t, "items", bookItem("a"))
+	res := l.write(t, "items", []obj{{"key": key, "version": v + 100, "title": "ahead"}})
+	at[string](t, res, "success", "0")
+	if got := at[string](t, l.item(t, key), "data", "title"); got != "ahead" {
+		t.Errorf("title = %q", got)
+	}
+}
+
+func testWriteMalformedKeyList(t *testing.T, e *env) {
+	l := e.userLib(t)
+	k1, _ := l.create(t, "items", bookItem("one"))
+	k2, _ := l.create(t, "items", bookItem("two"))
+	r := l.get(t, "items?format=keys&itemKey="+k1+",not-a-key,,"+k2)
+	mustStatus(t, r, 200)
+	if got := strings.Fields(string(r.Body)); len(got) != 2 {
+		t.Errorf("keys = %q, want %s and %s", got, k1, k2)
+	}
+	r = l.do(t, "DELETE", "items?itemKey="+k1+",bogus!", withIfUnmodified(l.version(t)))
+	mustStatus(t, r, 204)
+	mustStatus(t, l.get(t, "items/"+k1), 404)
+	mustStatus(t, l.get(t, "items/"+k2), 200)
+
+	// Nothing valid at all matches nothing; it is neither an error nor
+	// "no filter".
+	r = l.get(t, "items?format=versions&itemKey=bogus!")
+	mustStatus(t, r, 200)
+	if got := strings.TrimSpace(string(r.Body)); got != "{}" {
+		t.Errorf("versions for only-malformed keys = %q, want {}", got)
+	}
+	v := l.version(t)
+	r = l.do(t, "DELETE", "items?itemKey=bogus!", withIfUnmodified(v))
+	mustStatus(t, r, 204)
+	if got := versionHeader(t, r); got != v {
+		t.Errorf("no-op delete moved the library version %d -> %d", v, got)
+	}
+	mustStatus(t, l.get(t, "items/"+k2), 200)
 }

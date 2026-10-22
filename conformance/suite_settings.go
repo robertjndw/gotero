@@ -1,6 +1,7 @@
 package conformance
 
 import (
+	"fmt"
 	"slices"
 	"strconv"
 	"testing"
@@ -13,6 +14,9 @@ var settingsTests = []testCase{
 	{"DeleteSetting", testSettingsDelete},
 	{"SinceFilter", testSettingsSince},
 	{"RecreateClearsDeletedEntry", testSettingsRecreate},
+	{"ExplicitVersionZeroOnExisting412", testSettingsVersionZero},
+	{"ClientAheadOfSettingVersionAccepted", testSettingsClientAhead},
+	{"Allows270PerRequest", testSettingsLimit},
 }
 
 func tagColors(color string, version int64) obj {
@@ -100,4 +104,32 @@ func testSettingsRecreate(t *testing.T, e *env) {
 	if got := strs(at[[]any](t, parseObj(t, r), "settings")); slices.Contains(got, "tagColors") {
 		t.Errorf("recreated setting still in deleted log: %v", got)
 	}
+}
+
+func testSettingsVersionZero(t *testing.T, e *env) {
+	l := e.userLib(t)
+	mustStatus(t, l.post(t, "settings", tagColors("#FF0000", 0)), 204)
+	r := l.post(t, "settings", tagColors("#00FF00", 0))
+	mustStatus(t, r, 412)
+	r = l.get(t, "settings/tagColors")
+	if got := at[[]any](t, parseObj(t, r), "value"); got[0].(obj)["color"] != "#FF0000" {
+		t.Errorf("rejected write changed the setting: %v", got)
+	}
+}
+
+func testSettingsClientAhead(t *testing.T, e *env) {
+	l := e.userLib(t)
+	v := versionHeader(t, l.post(t, "settings", tagColors("#FF0000", 0)))
+	mustStatus(t, l.post(t, "settings", tagColors("#00FF00", v+50)), 204)
+}
+
+func testSettingsLimit(t *testing.T, e *env) {
+	l := e.userLib(t)
+	batch := obj{}
+	for i := 0; i < 270; i++ {
+		batch[fmt.Sprintf("s%d", i)] = obj{"value": i}
+	}
+	mustStatus(t, l.post(t, "settings", batch), 204)
+	batch["one-too-many"] = obj{"value": 1}
+	mustStatus(t, l.post(t, "settings", batch), 413)
 }
