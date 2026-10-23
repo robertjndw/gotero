@@ -26,7 +26,12 @@ func ctx() context.Context { return context.Background() }
 func newService(t *testing.T) (*accounts.Service, *pg.Store, *config.Config, *bytes.Buffer) {
 	t.Helper()
 	store := pg.New(pgtest.New(t))
-	cfg := &config.Config{Secret: strings.Repeat("s", 32), LocalLogin: true}
+	cfg := &config.Config{
+		Secret: strings.Repeat("s", 32), LocalLogin: true,
+		// UnlinkIdentity only counts links to configured providers, so the
+		// ones the identity tests use have to exist here.
+		OIDC: []config.OIDCProvider{{Name: "corp"}, {Name: "okta"}},
+	}
 	logs := &bytes.Buffer{}
 	svc := accounts.New(store, auth.NewAuthenticator(store.Keys(), store.Users()), cfg,
 		slog.New(slog.NewTextHandler(logs, nil)))

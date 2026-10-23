@@ -267,7 +267,9 @@ func (a *API) takeState(c *gin.Context, p sso.Provider) (*repo.SSOState, error) 
 		return nil, err
 	}
 	if st.Provider != p.Name() || !boundToBrowser(c, st) {
-		a.ssoFail(c, nil, "sso_state", errors.New("state does not match provider or browser"))
+		// Passing the state only picks the page to return to, so a link
+		// attempt lands back on /account where the error is shown.
+		a.ssoFail(c, &st, "sso_state", errors.New("state does not match provider or browser"))
 		return nil, nil
 	}
 	return &st, nil
@@ -411,6 +413,10 @@ func ssoErrorCode(err error) string {
 func (a *API) completeSSO(c *gin.Context, p sso.Provider, st repo.SSOState, ident sso.Identity) error {
 	ctx := c.Request.Context()
 	ext := accounts.ExternalIdentity{Provider: p.Name(), Identity: ident}
+	dest := st.ReturnTo
+	if !safeRedirect(dest) {
+		dest = "/"
+	}
 
 	if st.LinkUserID != nil {
 		// The session may have ended or switched users while the browser was
@@ -426,7 +432,7 @@ func (a *API) completeSSO(c *gin.Context, p sso.Provider, st repo.SSOState, iden
 			return nil
 		}
 		a.clearSSOCookies(c)
-		c.Redirect(http.StatusSeeOther, "/account")
+		c.Redirect(http.StatusSeeOther, dest)
 		return nil
 	}
 
@@ -449,10 +455,6 @@ func (a *API) completeSSO(c *gin.Context, p sso.Provider, st repo.SSOState, iden
 		return err
 	}
 	a.clearSSOCookies(c)
-	dest := st.ReturnTo
-	if !safeRedirect(dest) {
-		dest = "/"
-	}
 	c.Redirect(http.StatusSeeOther, dest)
 	return nil
 }

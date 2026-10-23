@@ -295,9 +295,12 @@ func (s *Service) UnlinkIdentity(ctx context.Context, userID int64, provider str
 	}
 	found, others := false, 0
 	for _, i := range idents {
-		if i.Provider == provider {
+		switch {
+		case i.Provider == provider:
 			found = true
-		} else {
+		case s.providerConfigured(i.Provider):
+			// A link to a provider that was removed from the config is still
+			// listed, but nobody can sign in through it anymore.
 			others++
 		}
 	}
@@ -308,4 +311,18 @@ func (s *Service) UnlinkIdentity(ctx context.Context, userID int64, provider str
 		return ErrLastLoginMethod
 	}
 	return s.store.Identities().Delete(ctx, userID, provider)
+}
+
+func (s *Service) providerConfigured(name string) bool {
+	for _, p := range s.cfg.OIDC {
+		if p.Name == name {
+			return true
+		}
+	}
+	for _, p := range s.cfg.SAML {
+		if p.Name == name {
+			return true
+		}
+	}
+	return false
 }

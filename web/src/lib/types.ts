@@ -17,7 +17,8 @@ export type User = {
 export type Identity = {
   provider: string
   providerName: string
-  kind: 'oidc' | 'saml'
+  // Empty for a provider that was removed from the config.
+  kind: 'oidc' | 'saml' | ''
   email: string
   createdAt: string
   lastLoginAt: string | null

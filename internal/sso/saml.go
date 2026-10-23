@@ -30,6 +30,9 @@ const (
 	// metadataTTL is how long fetched IdP metadata is trusted before a
 	// refetch, so IdP certificate rollovers get picked up.
 	metadataTTL = 24 * time.Hour
+	// metadataRetry is how long a stale copy is used after a failed refresh
+	// before the next fetch is attempted.
+	metadataRetry = 5 * time.Minute
 
 	nameIDTransient = "urn:oasis:names:tc:SAML:2.0:nameid-format:transient"
 )
@@ -166,6 +169,13 @@ func (p *samlProvider) idpMetadata(ctx context.Context) (*saml.EntityDescriptor,
 		// this fetch; the client timeout still bounds it.
 		md, err := samlsp.FetchMetadata(context.WithoutCancel(ctx), p.client, *u)
 		if err != nil {
+			p.mu.Lock()
+			if p.md != nil {
+				// Keep serving the stale copy for a while instead of making
+				// every login wait out the client timeout again.
+				p.fetchedAt = time.Now().Add(metadataRetry - metadataTTL)
+			}
+			p.mu.Unlock()
 			return nil, err
 		}
 		p.mu.Lock()

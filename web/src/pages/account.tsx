@@ -246,12 +246,14 @@ function IdentitiesCard() {
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm font-medium">
                     {i.providerName}{' '}
-                    <Badge variant="secondary" className="ml-1 uppercase">
-                      {i.kind}
-                    </Badge>
+                    {i.kind && (
+                      <Badge variant="secondary" className="ml-1 uppercase">
+                        {i.kind}
+                      </Badge>
+                    )}
                   </p>
                   <p className="truncate text-xs text-muted-foreground">
-                    {i.email} - last login {relativeTime(i.lastLoginAt)}
+                    {i.email ? `${i.email} - ` : ''}last login {relativeTime(i.lastLoginAt)}
                   </p>
                 </div>
                 <Button variant="outline" size="sm" onClick={() => setToUnlink(i)}>

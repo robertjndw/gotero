@@ -325,6 +325,14 @@ func TestUnlinkIdentityGuard(t *testing.T) {
 		require.NoError(t, svc.UnlinkIdentity(ctx(), u.ID, "okta"))
 		assert.ErrorIs(t, svc.UnlinkIdentity(ctx(), u.ID, "corp"), accounts.ErrLastLoginMethod)
 	})
+	t.Run("link to a removed provider does not count", func(t *testing.T) {
+		u, err := svc.LoginExternal(ctx(), login(extID("s5", ""), accounts.ExternalPolicy{AutoProvision: true}))
+		require.NoError(t, err)
+		gone := accounts.ExternalIdentity{Provider: "retired", Identity: sso.Identity{Subject: "r1"}}
+		require.NoError(t, svc.LinkExternal(ctx(), u.ID, gone))
+		assert.ErrorIs(t, svc.UnlinkIdentity(ctx(), u.ID, "corp"), accounts.ErrLastLoginMethod)
+		assert.NoError(t, svc.UnlinkIdentity(ctx(), u.ID, "retired"), "a dead link can always go")
+	})
 	t.Run("local login off", func(t *testing.T) {
 		cfg.LocalLogin = false
 		t.Cleanup(func() { cfg.LocalLogin = true })
