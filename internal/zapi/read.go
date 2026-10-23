@@ -46,13 +46,10 @@ const (
 
 // listParams are the query parameters shared by every listing.
 type listParams struct {
-	format string
-	since  int64
-	keys   []string
-	// noMatch is set when a key list was given but held only malformed keys.
-	// keys stays empty then, which would otherwise read as "no filter".
-	noMatch bool
-	limit   int // 0 means unlimited
+	format  string
+	since   int64
+	keys    []string // nil means no filter, empty matches nothing
+	limit   int      // 0 means unlimited
 	start   int
 	sort    string
 	desc    bool
@@ -86,9 +83,7 @@ func parseListParams(c *gin.Context, t repo.ObjectType) (listParams, error) {
 	p.since = since
 	if s := c.Query(zotero.ObjectType(t).KeyParam()); s != "" {
 		keys, err := zotero.ParseKeyListMax(s, zotero.MaxKeyList)
-		if errors.Is(err, zotero.ErrNoValidKeys) {
-			p.noMatch = true
-		} else if err != nil {
+		if err != nil {
 			return p, errStatus(http.StatusBadRequest, "Invalid "+zotero.ObjectType(t).KeyParam()+" value")
 		}
 		p.keys = keys
@@ -194,10 +189,6 @@ func (a *API) listObjects(t repo.ObjectType, sc scope) gin.HandlerFunc {
 			p.sort = "dateModified"
 			p.desc = p.desc || !c.Request.URL.Query().Has("direction")
 		}
-		if p.noMatch {
-			a.writeNoMatch(c, p)
-			return
-		}
 		q := listQuery(t, p, sc, scopeKey)
 		// Filtered in SQL so Total-Results, paging and counts agree with
 		// what the key may actually see.
@@ -209,20 +200,6 @@ func (a *API) listObjects(t repo.ObjectType, sc scope) gin.HandlerFunc {
 		default:
 			a.writeObjects(c, l, q, p, t)
 		}
-	}
-}
-
-// writeNoMatch answers a key filter that named nothing valid: an empty
-// listing in the requested format, not the whole library.
-func (a *API) writeNoMatch(c *gin.Context, p listParams) {
-	c.Header("Total-Results", "0")
-	switch p.format {
-	case "versions":
-		c.Data(http.StatusOK, "application/json", []byte("{}"))
-	case "keys":
-		c.Data(http.StatusOK, "text/plain; charset=UTF-8", nil)
-	default:
-		c.Data(http.StatusOK, "application/json", []byte("[]"))
 	}
 }
 

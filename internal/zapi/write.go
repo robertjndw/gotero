@@ -250,6 +250,17 @@ func stringList(m zotero.OrderedMap, name string) []string {
 	return out
 }
 
+// versionConflict is the per-object precondition shared by objects and
+// settings. Only a stored version newer than the client's counts as a
+// conflict; a client that is ahead of us (say after a restore) is let
+// through, the same way library versions are treated. A "version": 0 is
+// most often a create retried after its response was lost, and the client
+// turns a 412 into a full library resync, so when the content already
+// matches it is reported as unchanged instead.
+func versionConflict(stored, sent int64, unchanged bool) bool {
+	return stored > sent && (sent != 0 || !unchanged)
+}
+
 func planOne(opts planOpts, e entry, stored *repo.Object, refs refSets) outcome {
 	label := kindLabel(opts.Kind)
 	if opts.DenyNotes && stored != nil && stored.ItemType == "note" {
@@ -263,10 +274,6 @@ func planOne(opts planOpts, e entry, stored *repo.Object, refs refSets) outcome 
 			Msg:  label + " doesn't exist (it may have been deleted)",
 		})
 	}
-	// Only a stored version newer than the client's counts as a conflict. A
-	// client that is ahead of us (say after a restore) is let through, the
-	// same way library versions are treated.
-	stale := stored != nil && e.hasVersion && stored.Version > e.version
 	var (
 		data    zotero.OrderedMap
 		changed bool
@@ -283,11 +290,7 @@ func planOne(opts planOpts, e entry, stored *repo.Object, refs refSets) outcome 
 		werr = badRequest("Unsupported object type")
 	}
 	switch {
-	// A "version": 0 on an existing object is most often a create retried
-	// after its response was lost. The client turns a 412 into a full
-	// library resync, so when the content already matches we report it as
-	// unchanged instead; anything else still conflicts.
-	case stale && (e.version != 0 || werr != nil || changed):
+	case stored != nil && e.hasVersion && versionConflict(stored.Version, e.version, werr == nil && !changed):
 		return failedOutcome(e, &writeError{
 			Code: http.StatusPreconditionFailed,
 			Msg: fmt.Sprintf("%s has been modified since specified version (expected %d, found %d)",

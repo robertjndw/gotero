@@ -155,7 +155,6 @@ type AttachmentFile struct {
 type LibraryReader interface {
 	ID() int64
 	Version() int64
-	DeleteLogFloor() int64
 
 	Versions(ctx context.Context, q VersionsQuery) (iter.Seq2[KeyVersion, error], error)
 	Objects(ctx context.Context, q ListQuery) (iter.Seq2[Object, error], error)

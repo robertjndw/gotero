@@ -839,8 +839,8 @@ func TestPruneRaisesDeleteLogFloor(t *testing.T) {
 	assert.EqualValues(t, 2, n)
 
 	r, _ := s.Library(ctx(), u.LibraryID)
-	assert.EqualValues(t, 5, r.DeleteLogFloor())
-	del, _, _ := r.Deleted(ctx(), 0)
+	del, floor, _ := r.Deleted(ctx(), 0)
+	assert.EqualValues(t, 5, floor)
 	assert.Equal(t, []string{"NEWNEWN1"}, del[repo.TypeItem])
 
 	// Nothing left to prune, floor stays.
@@ -848,12 +848,12 @@ func TestPruneRaisesDeleteLogFloor(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, n)
 	r, _ = s.Library(ctx(), u.LibraryID)
-	assert.EqualValues(t, 5, r.DeleteLogFloor())
+	_, floor, _ = r.Deleted(ctx(), 0)
+	assert.EqualValues(t, 5, floor)
 }
 
-// A reader opened before a prune carries the old floor. Deleted must report
-// the floor from its own snapshot, or the handler would answer 200 with
-// entries that were already pruned.
+// A reader opened before a prune still has to get the new floor from Deleted.
+// Otherwise the handler answers 200 with entries that are already gone.
 func TestDeletedReturnsCurrentFloorAfterPrune(t *testing.T) {
 	s, pool := newStore(t)
 	u := mustUser(t, s, "alice")
@@ -862,14 +862,12 @@ func TestDeletedReturnsCurrentFloorAfterPrune(t *testing.T) {
 	})
 	r, err := s.Library(ctx(), u.LibraryID)
 	require.NoError(t, err)
-	require.EqualValues(t, 0, r.DeleteLogFloor())
 
 	_, err = pool.Exec(ctx(), `UPDATE deleted_log SET created_at = now() - interval '40 days'`)
 	require.NoError(t, err)
 	_, err = s.Prune(ctx(), time.Now(), 30*24*time.Hour)
 	require.NoError(t, err)
 
-	assert.EqualValues(t, 0, r.DeleteLogFloor(), "the header snapshot is stale by design")
 	del, floor, err := r.Deleted(ctx(), 1)
 	require.NoError(t, err)
 	assert.EqualValues(t, 3, floor)

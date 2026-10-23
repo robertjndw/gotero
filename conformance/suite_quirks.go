@@ -349,11 +349,10 @@ func testQuirkKeepFileFields(t *testing.T, e *env) {
 
 func testQuirkEmptyRelations(t *testing.T, e *env) {
 	l := e.userLib(t)
-	for _, typ := range []string{"items", "collections"} {
-		o := obj{"name": "r", "relations": []any{}}
-		if typ == "items" {
-			o = obj{"itemType": "book", "title": "r", "relations": []any{}}
-		}
+	for typ, o := range map[string]obj{
+		"items":       {"itemType": "book", "title": "r", "relations": []any{}},
+		"collections": {"name": "r", "relations": []any{}},
+	} {
 		key, _ := l.create(t, typ, o)
 		r := l.get(t, typ+"/"+key)
 		mustStatus(t, r, 200)

@@ -280,13 +280,9 @@ for (const ref of await pinnedRefs()) {
 
       it('POST items/{key}/file without If-Match or If-None-Match is 428', async () => {
         const item = await newAttachment(randomBytes(50));
-        const res = await fetch(`${BASE_URL}users/${user.userID}/items/${item.key}/file`, {
+        const res = await fetch(fileURL(item.key), {
           method: 'POST',
-          headers: {
-            'Zotero-API-Key': user.key,
-            'Zotero-API-Version': '3',
-            'Content-Type': 'application/x-www-form-urlencoded',
-          },
+          headers: apiHeaders(),
           body: `md5=${md5('x')}&filename=a.pdf&filesize=1&mtime=${MTIME}`,
         });
         assert.equal(res.status, 428);

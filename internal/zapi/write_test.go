@@ -506,6 +506,8 @@ func TestPlanNullCollectionsAreNormalized(t *testing.T) {
 
 func TestPlanAttachmentExtras(t *testing.T) {
 	f := newFakeLib()
+	group := opts(repo.TypeItem, false)
+	group.Group = true
 	const stored = `{"itemType":"attachment","linkMode":"imported_file","md5":"abc","mtime":9,"lastRead":100,"tags":[],"collections":[],"relations":{},"dateAdded":"2020-01-01T00:00:00Z","dateModified":"2020-01-01T00:00:00Z"}`
 	f.put(repo.TypeItem, "AAAAAAA2", 3, stored)
 	f.put(repo.TypeItem, "LINKEDA2", 3, `{"itemType":"attachment","linkMode":"linked_file","path":"/x","tags":[],"collections":[],"relations":{},"dateAdded":"2020-01-01T00:00:00Z","dateModified":"2020-01-01T00:00:00Z"}`)
@@ -529,17 +531,13 @@ func TestPlanAttachmentExtras(t *testing.T) {
 		assert.Equal(t, outUnchanged, o.Status)
 	})
 	t.Run("lastRead is refused in group libraries", func(t *testing.T) {
-		g := opts(repo.TypeItem, false)
-		g.Group = true
-		o := plan(t, newFakeLib(), g, `{"itemType":"attachment","linkMode":"imported_file","lastRead":5}`)[0]
+		o := plan(t, newFakeLib(), group, `{"itemType":"attachment","linkMode":"imported_file","lastRead":5}`)[0]
 		require.Equal(t, outFailed, o.Status)
 		assert.Equal(t, 400, o.Fail.Code)
 		assert.Equal(t, "lastRead can only be set in user libraries", o.Fail.Message)
 	})
 	t.Run("clearing lastRead is fine in group libraries", func(t *testing.T) {
-		g := opts(repo.TypeItem, false)
-		g.Group = true
-		o := plan(t, newFakeLib(), g, `{"itemType":"attachment","linkMode":"imported_file","lastRead":null}`)[0]
+		o := plan(t, newFakeLib(), group, `{"itemType":"attachment","linkMode":"imported_file","lastRead":null}`)[0]
 		require.Equal(t, outCreated, o.Status, "%+v", o.Fail)
 		assert.NotContains(t, dataOf(t, o), "lastRead")
 	})
@@ -555,9 +553,7 @@ func TestPlanAttachmentExtras(t *testing.T) {
 		assert.Equal(t, outFailed, o.Status)
 	})
 	t.Run("path is refused in group libraries", func(t *testing.T) {
-		g := opts(repo.TypeItem, false)
-		g.Group = true
-		o := plan(t, newFakeLib(), g, `{"itemType":"attachment","linkMode":"linked_file","path":"/a"}`)[0]
+		o := plan(t, newFakeLib(), group, `{"itemType":"attachment","linkMode":"linked_file","path":"/a"}`)[0]
 		require.Equal(t, outFailed, o.Status)
 		assert.Equal(t, 400, o.Fail.Code)
 		assert.Equal(t, "Linked files can only be added to user libraries", o.Fail.Message)

@@ -41,14 +41,12 @@ type libReader struct {
 	q       querier
 	id      int64
 	version int64
-	floor   int64
 	used    int64
 }
 
-func (r *libReader) ID() int64             { return r.id }
-func (r *libReader) Version() int64        { return r.version }
-func (r *libReader) DeleteLogFloor() int64 { return r.floor }
-func (r *libReader) StorageUsed() int64    { return r.used }
+func (r *libReader) ID() int64          { return r.id }
+func (r *libReader) Version() int64     { return r.version }
+func (r *libReader) StorageUsed() int64 { return r.used }
 
 // Library returns an unlocked reader. The header values are read once here.
 func (s *Store) Library(ctx context.Context, libraryID int64) (repo.LibraryReader, error) {
@@ -61,8 +59,8 @@ func (s *Store) Library(ctx context.Context, libraryID int64) (repo.LibraryReade
 	}
 	defer conn.Release()
 	err = conn.QueryRow(ctx,
-		`SELECT version, delete_log_floor, storage_used FROM libraries WHERE id = $1`, libraryID,
-	).Scan(&r.version, &r.floor, &r.used)
+		`SELECT version, storage_used FROM libraries WHERE id = $1`, libraryID,
+	).Scan(&r.version, &r.used)
 	if err != nil {
 		return nil, wrap("load library", err)
 	}
@@ -285,11 +283,11 @@ func (s *Store) InLibrary(ctx context.Context, libraryID int64, fn func(tx repo.
 	b := &pgx.Batch{}
 	b.Queue(`SELECT set_config('lock_timeout', $1, true), set_config('statement_timeout', $2, true)`,
 		ms(s.cfg.lockTimeout), ms(s.cfg.statementTimeout))
-	b.Queue(`SELECT version, delete_log_floor, storage_used FROM libraries WHERE id = $1 FOR UPDATE`, libraryID)
+	b.Queue(`SELECT version, storage_used FROM libraries WHERE id = $1 FOR UPDATE`, libraryID)
 	br := tx.SendBatch(ctx, b)
 	_, err = br.Exec()
 	if err == nil {
-		err = br.QueryRow().Scan(&lt.version, &lt.floor, &lt.used)
+		err = br.QueryRow().Scan(&lt.version, &lt.used)
 	}
 	if cerr := br.Close(); err == nil {
 		err = cerr

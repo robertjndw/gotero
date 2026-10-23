@@ -38,7 +38,7 @@ type Runner struct {
 	files *files.Service
 	log   *slog.Logger
 	now   func() time.Time
-	// keepDeleted is the delete-log retention; 0 keeps the log forever.
+	// keepDeleted is the delete-log retention; <= 0 keeps the log forever.
 	keepDeleted time.Duration
 
 	// gcMu keeps a manual GC from the admin UI and the scheduled one from
@@ -46,9 +46,8 @@ type Runner struct {
 	gcMu sync.Mutex
 }
 
-// New builds a Runner. keepDeleted <= 0 never prunes the delete log.
 func New(store repo.Store, files *files.Service, log *slog.Logger, keepDeleted time.Duration) *Runner {
-	return &Runner{store: store, files: files, log: log, now: time.Now, keepDeleted: max(keepDeleted, 0)}
+	return &Runner{store: store, files: files, log: log, now: time.Now, keepDeleted: keepDeleted}
 }
 
 // Run blocks until ctx is cancelled.

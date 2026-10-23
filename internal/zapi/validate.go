@@ -294,26 +294,35 @@ func dropEmptyTags(patch *zotero.OrderedMap) {
 	if !ok {
 		return
 	}
+	// Almost no write has an empty tag, so look at the names first and only
+	// rebuild the array when one turns up. Untouched bytes also keep
+	// unchanged detection exact.
+	var names []struct {
+		Tag *string `json:"tag"`
+	}
+	if json.Unmarshal(raw, &names) != nil {
+		return
+	}
+	drop := make([]bool, len(names))
+	found := false
+	for i, n := range names {
+		drop[i] = n.Tag != nil && strings.TrimSpace(*n.Tag) == ""
+		found = found || drop[i]
+	}
+	if !found {
+		return
+	}
 	var tags []json.RawMessage
 	if json.Unmarshal(raw, &tags) != nil {
 		return
 	}
-	kept := tags[:0:0]
-	for _, t := range tags {
-		var v struct {
-			Tag *string `json:"tag"`
+	kept := make([]json.RawMessage, 0, len(tags))
+	for i, t := range tags {
+		if !drop[i] {
+			kept = append(kept, t)
 		}
-		if json.Unmarshal(t, &v) == nil && v.Tag != nil && strings.TrimSpace(*v.Tag) == "" {
-			continue
-		}
-		kept = append(kept, t)
 	}
-	if len(kept) == len(tags) {
-		return // leave the bytes alone so unchanged detection sees them as sent
-	}
-	if b, err := json.Marshal(kept); err == nil {
-		patch.Set("tags", b)
-	}
+	_ = patch.SetValue("tags", kept)
 }
 
 // checkAttachmentExtras covers the attachment fields whose validity depends
@@ -369,5 +378,9 @@ func normalizeAttachmentExtras(p *prepared) {
 // isClearedLastRead reports the values that clear lastRead. 0 is excluded:
 // it is a real (if odd) timestamp.
 func isClearedLastRead(raw json.RawMessage) bool {
-	return isFalsy(raw) && string(bytes.TrimSpace(raw)) != "0"
+	switch string(bytes.TrimSpace(raw)) {
+	case "null", `""`, "false":
+		return true
+	}
+	return false
 }

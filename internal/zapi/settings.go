@@ -148,11 +148,8 @@ func (a *API) writeSettings(c *gin.Context, l *LibraryContext, in map[string]set
 		var changed []repo.Setting
 		for k, s := range in {
 			cur, exists := byKey[k]
-			// Same rule as objects: only a newer stored version conflicts,
-			// and a version 0 retry of the value already stored is let
-			// through as unchanged.
 			same := exists && zotero.EqualJSON(cur.Value, s.Value)
-			if exists && s.Version != nil && cur.Version > *s.Version && (!same || *s.Version != 0) {
+			if exists && s.Version != nil && versionConflict(cur.Version, *s.Version, same) {
 				return &httpError{
 					status: http.StatusPreconditionFailed, version: tx.Version(),
 					msg: fmt.Sprintf("Setting '%s' has been modified since specified version (expected %d, found %d)",

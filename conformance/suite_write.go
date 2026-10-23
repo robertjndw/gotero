@@ -359,8 +359,8 @@ func testWriteVersionZero(t *testing.T, e *env) {
 	l := e.userLib(t)
 	key, _ := l.create(t, "items", bookItem("z"))
 	res := l.write(t, "items", []obj{{"key": key, "version": 0, "title": "again"}})
-	if len(at[obj](t, res, "failed")) != 1 || atInt(t, res, "failed", "0", "code") != 412 {
-		t.Errorf("want failed[0] 412, got %v", res)
+	if c := failCode(t, res); c != 412 {
+		t.Errorf("failed[0] code = %d, want 412", c)
 	}
 	// Without a version the write is still a blind overwrite.
 	l.write(t, "items", []obj{{"key": key, "title": "blind"}})

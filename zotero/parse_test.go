@@ -23,8 +23,8 @@ func TestParseKeyList(t *testing.T) {
 		{",ABCD2345", []string{"ABCD2345"}, false},
 		{"ABCD2345,,EFGH6789", []string{"ABCD2345", "EFGH6789"}, false},
 		{"ABCD2345,bogus,EFGH6789", []string{"ABCD2345", "EFGH6789"}, false},
-		{"abcd2345", nil, true},
-		{"ABCD2345;EFGH6789", nil, true},
+		{"abcd2345", []string{}, false},
+		{"ABCD2345;EFGH6789", []string{}, false},
 	}
 	for _, tc := range tests {
 		got, err := ParseKeyList(tc.in)

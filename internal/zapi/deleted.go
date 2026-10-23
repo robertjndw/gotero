@@ -23,8 +23,8 @@ func (a *API) getDeleted(c *gin.Context) {
 	}
 	// Entries at or below the floor have been pruned, so a client older than
 	// that cannot learn what was deleted and must resync from scratch. The
-	// floor comes from the same snapshot as the entries; the one cached on
-	// the reader may predate a prune.
+	// floor comes from the same snapshot as the entries, so a prune running
+	// concurrently cannot slip between them.
 	if since > 0 && since < floor {
 		Fail(c, http.StatusConflict, "'since' is older than the oldest retained deletion; a full sync is required")
 		return

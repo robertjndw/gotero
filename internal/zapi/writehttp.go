@@ -339,14 +339,13 @@ func (a *API) deleteObjects(t repo.ObjectType) gin.HandlerFunc {
 		case err != nil && isTooMany(err):
 			Fail(c, http.StatusRequestEntityTooLarge, fmt.Sprintf("Too many keys (max %d)", maxObjectsPerWrite))
 			return
-		case errors.Is(err, zotero.ErrNoValidKeys):
-			// Nothing to delete, so nothing to version either.
-			a.deleteNothing(c, l, pre)
-			return
 		case err != nil:
 			Fail(c, http.StatusBadRequest, "Invalid "+param)
 			return
-		case len(keys) == 0:
+		case keys == nil:
+			// Only a missing list is an error. A list of nothing but
+			// malformed keys runs the normal path, which checks the
+			// precondition and leaves the version alone.
 			Fail(c, http.StatusBadRequest, param+" not provided")
 			return
 		}
@@ -369,24 +368,6 @@ func (a *API) deleteObjects(t repo.ObjectType) gin.HandlerFunc {
 		a.finishWrite(c, l, before, v)
 		c.Status(http.StatusNoContent)
 	}
-}
-
-// deleteNothing answers a delete whose key list had only malformed keys. The
-// precondition is still checked so a stale client sees the same 412 as it
-// would for a real delete, but the library version stays put.
-func (a *API) deleteNothing(c *gin.Context, l *LibraryContext, pre precond) {
-	ctx := c.Request.Context()
-	var v int64
-	_, err := a.store.InLibrary(ctx, l.LibraryID, func(tx repo.LibraryTx) error {
-		v = tx.Version()
-		return checkLibraryVersion(tx, pre)
-	})
-	if err != nil {
-		a.FailErr(c, err)
-		return
-	}
-	setVersion(c, v)
-	c.Status(http.StatusNoContent)
 }
 
 // deleteObject handles DELETE /{type}/{key}.

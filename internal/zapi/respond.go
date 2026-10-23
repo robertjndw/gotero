@@ -6,6 +6,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -54,7 +55,7 @@ func (a *API) FailErr(c *gin.Context, err error) {
 		// error that maps to ErrBusy.
 		c.Abort()
 	case errors.Is(err, repo.ErrBusy):
-		c.Header("Retry-After", strconv.Itoa(retryAfterSeconds()))
+		c.Header("Retry-After", httpx.RetryAfter(retryAfter()))
 		Fail(c, http.StatusServiceUnavailable, "Library is busy, try again shortly")
 	default:
 		a.log.ErrorContext(c.Request.Context(), "zapi: request failed", "method", c.Request.Method,
@@ -63,9 +64,9 @@ func (a *API) FailErr(c *gin.Context, err error) {
 	}
 }
 
-// retryAfterSeconds is jittered so clients that were all turned away at once
-// do not come back in lockstep.
-func retryAfterSeconds() int { return 3 + rand.IntN(6) } //nolint:gosec // jitter, not a security control
+// retryAfter is jittered so clients that were all turned away at once do not
+// come back in lockstep.
+func retryAfter() time.Duration { return time.Duration(3+rand.IntN(6)) * time.Second } //nolint:gosec // jitter, not a security control
 
 func setVersion(c *gin.Context, v int64) {
 	c.Header("Last-Modified-Version", strconv.FormatInt(v, 10))
