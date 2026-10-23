@@ -82,7 +82,7 @@ func newEnv(tb testing.TB, opts ...envOpt) *testEnv {
 	fs := files.NewService(backend, store.Files(), "0123456789abcdef0123456789abcdef")
 	// The same guarded login the server wires in, so legacy POST /keys is
 	// rate limited here exactly as in production.
-	acc := accounts.New(store, a, &config.Config{Secret: "0123456789abcdef0123456789abcdef"}, nil)
+	acc := accounts.New(store, a, &config.Config{Secret: "0123456789abcdef0123456789abcdef", LocalLogin: true}, nil)
 	deps := zapi.Deps{
 		Login: acc.Login, DefaultQuota: acc.DefaultQuota,
 		Store: store, Auth: a, Schema: schema.Default(), Publisher: pub,

@@ -27,6 +27,7 @@ import (
 	"github.com/robertjndw/gotero/internal/repo"
 	"github.com/robertjndw/gotero/internal/repo/pg"
 	"github.com/robertjndw/gotero/internal/repo/pg/pgtest"
+	"github.com/robertjndw/gotero/internal/sso"
 )
 
 func TestMain(m *testing.M) { pgtest.Main(m) }
@@ -93,12 +94,17 @@ type env struct {
 	gc     *fakeGC
 	srv    *httptest.Server
 	cfg    *config.Config
+	sso    *sso.Registry
 	admin  repo.User
 }
 
 type envOpts struct {
 	publicURL string
 	validator adminapi.ImportValidator
+	// cfg adjusts the config before the SSO registry is built. When it
+	// configures a provider and publicURL is empty, the public URL becomes
+	// the test server's address so callbacks and the ACS resolve to it.
+	cfg func(*config.Config)
 }
 
 func newEnv(t *testing.T, opts ...envOpts) *env {
@@ -106,13 +112,26 @@ func newEnv(t *testing.T, opts ...envOpts) *env {
 	pool := pgtest.New(t)
 	store := pg.New(pool)
 	cfg := &config.Config{
-		Secret:  "0123456789abcdef0123456789abcdef",
-		Storage: config.Storage{Backend: "local"},
+		Secret:     "0123456789abcdef0123456789abcdef",
+		Storage:    config.Storage{Backend: "local"},
+		LocalLogin: true,
 	}
 	var o envOpts
 	if len(opts) > 0 {
 		o = opts[0]
 	}
+	// The listener exists before Start so the public URL is known up front.
+	srv := httptest.NewUnstartedServer(nil)
+	publicURL := o.publicURL
+	if o.cfg != nil {
+		o.cfg(cfg)
+		if cfg.SSOEnabled() && publicURL == "" {
+			publicURL = "http://" + srv.Listener.Addr().String()
+		}
+		cfg.PublicURL = publicURL
+	}
+	reg, err := sso.New(cfg, nil)
+	require.NoError(t, err)
 	e := &env{t: t, pool: pool, store: store, cfg: cfg, clock: &clock{}, notify: &notifier{}, gc: &fakeGC{}}
 	e.auth = auth.NewAuthenticator(store.Keys(), store.Users())
 	e.acc = accounts.New(store, e.auth, cfg, nil)
@@ -120,12 +139,15 @@ func newEnv(t *testing.T, opts ...envOpts) *env {
 
 	api := adminapi.New(adminapi.Deps{
 		Store: store, Auth: e.auth, Accounts: e.acc, Config: cfg, Now: e.clock.Now, Version: "test",
-		GC: e.gc, Notifier: e.notify, ImportValidator: o.validator,
+		GC: e.gc, Notifier: e.notify, ImportValidator: o.validator, SSO: reg,
 	})
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
 	api.Register(engine.Group("/admin/api"))
-	e.srv = httptest.NewServer(httpx.Chain(engine, httpx.ResolvePublicURL(o.publicURL, nil)))
+	api.RegisterSSO(engine.Group("/auth"))
+	srv.Config.Handler = httpx.Chain(engine, httpx.ResolvePublicURL(publicURL, nil))
+	srv.Start()
+	e.srv, e.sso = srv, reg
 	t.Cleanup(e.srv.Close)
 
 	admin, err := e.acc.CreateUser(context.Background(), accounts.CreateUserInput{

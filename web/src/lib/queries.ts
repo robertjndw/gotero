@@ -109,11 +109,23 @@ export function useUpdateProfile() {
     onSuccess: (me) => qc.setQueryData(qk.me, me),
   })
 }
-export const useChangePassword = () =>
-  useMutation({
-    mutationFn: (b: { currentPassword: string; newPassword: string }) =>
+export function useChangePassword() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (b: { currentPassword?: string; newPassword: string }) =>
       api<void>('/me/password', { method: 'POST', body: b }),
+    // Setting a first password flips hasPassword, which changes the card.
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.me, exact: true }),
   })
+}
+export function useUnlinkIdentity() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (provider: string) =>
+      api<void>(`/me/identities/${encodeURIComponent(provider)}`, { method: 'DELETE' }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.me, exact: true }),
+  })
+}
 
 export const useKeys = () =>
   useQuery({
@@ -192,6 +204,16 @@ export function useUpdateUser() {
   return useMutation({
     mutationFn: ({ id, ...b }: UserPatch & { id: number }) =>
       api<User>(`/admin/users/${id}`, { method: 'PATCH', body: b }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'users'] }),
+  })
+}
+export function useAdminUnlinkIdentity() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (b: { userId: number; provider: string }) =>
+      api<void>(`/admin/users/${b.userId}/identities/${encodeURIComponent(b.provider)}`, {
+        method: 'DELETE',
+      }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'users'] }),
   })
 }

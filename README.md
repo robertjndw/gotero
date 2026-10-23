@@ -7,6 +7,7 @@ Point your Zotero desktop app at gotero instead of zotero.org and it syncs your 
 - Works with unmodified Zotero desktop. CI tests against real Zotero builds (current and previous major release).
 - Attachments go to a local directory, any S3-compatible service or a WebDAV server.
 - Multiple users and shared group libraries with owner, admin and member roles. An admin adds users directly or sends invite links.
+- Sign-in with passwords, OpenID Connect or SAML, with optional automatic account creation per provider.
 - Web UI for managing users, groups, invites, quotas and API keys, and for approving Zotero logins.
 - Supports Zotero's streaming endpoint, so other devices hear about changes as they happen.
 - Can import an existing library from zotero.org, including its files.

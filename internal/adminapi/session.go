@@ -68,20 +68,20 @@ func (a *API) secureCookies(c *gin.Context) bool {
 }
 
 func (a *API) setCookie(c *gin.Context, token string, expires time.Time) {
-	//nolint:gosec // Secure follows the public URL scheme; plain http is allowed for local setups.
-	http.SetCookie(c.Writer, &http.Cookie{
-		Name: cookieName, Value: token, Path: "/", Expires: expires,
-		MaxAge: int(sessionLifetime / time.Second), HttpOnly: true,
-		Secure: a.secureCookies(c), SameSite: http.SameSiteLaxMode,
+	a.writeCookie(c, &http.Cookie{
+		Name: cookieName, Value: token, Path: "/", Expires: expires, MaxAge: int(sessionLifetime / time.Second),
 	})
 }
 
 func (a *API) clearCookie(c *gin.Context) {
+	a.writeCookie(c, &http.Cookie{Name: cookieName, Value: "", Path: "/", MaxAge: -1})
+}
+
+// writeCookie sets the flags every cookie of this API shares.
+func (a *API) writeCookie(c *gin.Context, ck *http.Cookie) {
+	ck.HttpOnly, ck.Secure, ck.SameSite = true, a.secureCookies(c), http.SameSiteLaxMode
 	//nolint:gosec // Secure follows the public URL scheme; plain http is allowed for local setups.
-	http.SetCookie(c.Writer, &http.Cookie{
-		Name: cookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true,
-		Secure: a.secureCookies(c), SameSite: http.SameSiteLaxMode,
-	})
+	http.SetCookie(c.Writer, ck)
 }
 
 // startSession creates a session for u, sets the cookie and the CSRF header.

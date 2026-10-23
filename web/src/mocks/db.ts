@@ -1,4 +1,14 @@
-import type { ApiKey, Group, GroupMember, ImportJob, Invite, LoginSession, User } from '@/lib/types'
+import type {
+  ApiKey,
+  Group,
+  GroupMember,
+  Identity,
+  ImportJob,
+  Invite,
+  LoginSession,
+  SsoProvider,
+  User,
+} from '@/lib/types'
 
 const GB = 1024 ** 3
 const MB = 1024 ** 2
@@ -11,6 +21,9 @@ export type DbState = {
   sessionUserId: number | null
   csrf: string
   passwords: Record<number, string>
+  identities: Record<number, Identity[]>
+  providers: SsoProvider[]
+  localLogin: boolean
   users: User[]
   keys: Record<number, ApiKey[]>
   groups: Group[]
@@ -21,6 +34,15 @@ export type DbState = {
   settings: { openRegistration: boolean; defaultQuotaBytes: number | null }
   publicUrl: string
   nextId: number
+}
+
+const keycloakIdentity: Identity = {
+  provider: 'keycloak',
+  providerName: 'Keycloak',
+  kind: 'oidc',
+  email: '',
+  createdAt: ago(20 * DAY),
+  lastLoginAt: ago(2 * DAY),
 }
 
 function seed(): DbState {
@@ -36,6 +58,8 @@ function seed(): DbState {
       usedBytes: 2.4 * GB,
       createdAt: ago(90 * DAY),
       lastSyncAt: ago(5 * 60_000),
+      hasPassword: true,
+      providers: [],
     },
     {
       id: 2,
@@ -48,6 +72,8 @@ function seed(): DbState {
       usedBytes: 1.2 * GB,
       createdAt: ago(40 * DAY),
       lastSyncAt: ago(3 * HOUR),
+      hasPassword: true,
+      providers: ['keycloak'],
     },
     {
       id: 3,
@@ -60,6 +86,8 @@ function seed(): DbState {
       usedBytes: 310 * MB,
       createdAt: ago(12 * DAY),
       lastSyncAt: null,
+      hasPassword: false,
+      providers: ['keycloak'],
     },
   ]
   const groups: Group[] = [
@@ -93,7 +121,28 @@ function seed(): DbState {
   return {
     sessionUserId: null,
     csrf: 'csrf-mock-token',
-    passwords: { 1: 'password', 2: 'password', 3: 'password' },
+    // Bob is SSO-only: no entry here and hasPassword false.
+    passwords: { 1: 'password', 2: 'password' },
+    identities: {
+      1: [],
+      2: [{ ...keycloakIdentity, email: 'alice@example.org' }],
+      3: [{ ...keycloakIdentity, email: 'bob@example.org' }],
+    },
+    providers: [
+      {
+        id: 'keycloak',
+        kind: 'oidc',
+        displayName: 'Keycloak',
+        startUrl: '/auth/oidc/keycloak/start',
+      },
+      {
+        id: 'corp-saml',
+        kind: 'saml',
+        displayName: 'Corp SAML',
+        startUrl: '/auth/saml/corp-saml/start',
+      },
+    ],
+    localLogin: true,
     users,
     keys: {
       1: [

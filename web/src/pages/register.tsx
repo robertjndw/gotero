@@ -18,6 +18,7 @@ import {
 import { Skeleton } from '@/components/ui/skeleton'
 import { Field, usePageTitle } from '@/components/common'
 import { applyServerError } from '@/lib/forms'
+import { SsoButtons } from '@/components/sso'
 
 const schema = z.object({
   username: z
@@ -50,7 +51,7 @@ function Closed({ title, text }: { title: string; text: string }) {
 
 export default function RegisterPage() {
   usePageTitle('Register')
-  const { invite } = useSearch({ from: '/register' })
+  const { invite, error } = useSearch({ from: '/register' })
   const navigate = useNavigate()
   const setup = useSetup()
   const inv = useInvite(invite)
@@ -71,6 +72,9 @@ export default function RegisterPage() {
   const loading = setup.isLoading || (!!invite && inv.isLoading)
   const inviteOk = !!invite && inv.data?.valid
   const allowed = inviteOk || (!invite && setup.data?.openRegistration)
+  const localLogin = setup.data?.localLogin ?? true
+  // SSO signup needs an invite token, since the server only provisions accounts for invites here.
+  const ssoProviders = inviteOk ? (setup.data?.providers ?? []) : []
 
   let body
   if (loading) body = <Skeleton className="h-96 w-full" />
@@ -81,7 +85,7 @@ export default function RegisterPage() {
         text="This invitation link is expired, already used or unknown. Ask an administrator for a new one."
       />
     )
-  } else if (!allowed) {
+  } else if (!allowed || (!localLogin && ssoProviders.length === 0)) {
     body = (
       <Closed
         title="Registration is closed"
@@ -99,66 +103,76 @@ export default function RegisterPage() {
               : 'Registration is open on this server.'}
           </CardDescription>
         </CardHeader>
-        <form
-          noValidate
-          onSubmit={handleSubmit((v) =>
-            reg.mutate(
-              { ...v, inviteToken: invite },
-              {
-                onSuccess: () => navigate({ to: '/' }),
-                onError: (e) => applyServerError(e, setError),
-              },
-            ),
-          )}
-        >
-          <CardContent className="grid gap-4">
-            <Field label="Username" htmlFor="username" error={errors.username?.message}>
-              <Input
-                id="username"
-                autoComplete="username"
-                aria-invalid={!!errors.username}
-                {...register('username')}
-              />
-            </Field>
-            <Field label="Display name" htmlFor="displayName" error={errors.displayName?.message}>
-              <Input
-                id="displayName"
-                autoComplete="name"
-                aria-invalid={!!errors.displayName}
-                {...register('displayName')}
-              />
-            </Field>
-            <Field label="Email" htmlFor="email" error={errors.email?.message}>
-              <Input
-                id="email"
-                type="email"
-                autoComplete="email"
-                readOnly={!!inviteEmail}
-                aria-invalid={!!errors.email}
-                {...register('email')}
-              />
-            </Field>
-            <Field
-              label="Password"
-              htmlFor="password"
-              error={errors.password?.message}
-              hint="At least 8 characters."
-            >
-              <Input
-                id="password"
-                type="password"
-                autoComplete="new-password"
-                aria-invalid={!!errors.password}
-                {...register('password')}
-              />
-            </Field>
-          </CardContent>
-          <CardFooter className="mt-6">
-            <Button type="submit" className="w-full" disabled={reg.isPending}>
-              {reg.isPending ? 'Creating account...' : 'Create account'}
-            </Button>
-          </CardFooter>
-        </form>
+        <SsoButtons
+          providers={ssoProviders}
+          error={error}
+          verb="Sign up with"
+          params={{ invite }}
+          divider={localLogin ? 'or create a password' : undefined}
+          className="mb-4"
+        />
+        {localLogin && (
+          <form
+            noValidate
+            onSubmit={handleSubmit((v) =>
+              reg.mutate(
+                { ...v, inviteToken: invite },
+                {
+                  onSuccess: () => navigate({ to: '/' }),
+                  onError: (e) => applyServerError(e, setError),
+                },
+              ),
+            )}
+          >
+            <CardContent className="grid gap-4">
+              <Field label="Username" htmlFor="username" error={errors.username?.message}>
+                <Input
+                  id="username"
+                  autoComplete="username"
+                  aria-invalid={!!errors.username}
+                  {...register('username')}
+                />
+              </Field>
+              <Field label="Display name" htmlFor="displayName" error={errors.displayName?.message}>
+                <Input
+                  id="displayName"
+                  autoComplete="name"
+                  aria-invalid={!!errors.displayName}
+                  {...register('displayName')}
+                />
+              </Field>
+              <Field label="Email" htmlFor="email" error={errors.email?.message}>
+                <Input
+                  id="email"
+                  type="email"
+                  autoComplete="email"
+                  readOnly={!!inviteEmail}
+                  aria-invalid={!!errors.email}
+                  {...register('email')}
+                />
+              </Field>
+              <Field
+                label="Password"
+                htmlFor="password"
+                error={errors.password?.message}
+                hint="At least 8 characters."
+              >
+                <Input
+                  id="password"
+                  type="password"
+                  autoComplete="new-password"
+                  aria-invalid={!!errors.password}
+                  {...register('password')}
+                />
+              </Field>
+            </CardContent>
+            <CardFooter className="mt-6">
+              <Button type="submit" className="w-full" disabled={reg.isPending}>
+                {reg.isPending ? 'Creating account...' : 'Create account'}
+              </Button>
+            </CardFooter>
+          </form>
+        )}
       </Card>
     )
   }

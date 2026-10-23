@@ -41,6 +41,16 @@ var (
 	ErrOwnsGroups         = errors.New("accounts: user still owns groups")
 	ErrBadCredentials     = errors.New("accounts: bad credentials")
 	ErrDisabled           = errors.New("accounts: account is disabled")
+
+	ErrLocalLoginDisabled = errors.New("accounts: password sign-in is disabled")
+	ErrNoAccount          = errors.New("accounts: no account for this identity")
+	// ErrLinkRequired deliberately covers both "the email belongs to an
+	// administrator" and "the email is taken by an account we cannot link", so
+	// it cannot be used to find out which addresses are admins.
+	ErrLinkRequired        = errors.New("accounts: an account with this email exists; sign in to it and connect the provider")
+	ErrIdentityInUse       = errors.New("accounts: identity is already linked")
+	ErrLastLoginMethod     = errors.New("accounts: this is the last way to sign in")
+	ErrInviteEmailMismatch = errors.New("accounts: invite was issued for a different email address")
 )
 
 // ValidationError carries per-field messages for 422 responses.
@@ -285,7 +295,9 @@ func (s *Service) Authenticate(ctx context.Context, username, password string) (
 		return repo.User{}, err
 	}
 	ok, err := s.guard.Verify(ctx, u.PasswordHash, password)
-	if err != nil || !ok {
+	// The policy is checked after verifying so a correct password for an
+	// account that may not use one looks exactly like a wrong one.
+	if err != nil || !ok || !s.LocalLoginAllowed(u) {
 		return repo.User{}, ErrBadCredentials
 	}
 	if u.Disabled {
@@ -293,6 +305,10 @@ func (s *Service) Authenticate(ctx context.Context, username, password string) (
 	}
 	return u, nil
 }
+
+// LocalLoginAllowed reports whether the user may sign in with a password.
+// Administrators always may, so the instance cannot lock itself out.
+func (s *Service) LocalLoginAllowed(u repo.User) bool { return s.cfg.LocalLogin || u.IsAdmin }
 
 // Login is Authenticate for requests from the network: it is rate limited
 // per (username, client IP) and per client IP.
@@ -305,7 +321,10 @@ func (s *Service) Login(ctx context.Context, username, password, ip string) (rep
 	if err == nil || errors.Is(err, ErrDisabled) {
 		s.guard.Succeeded(name, ip)
 	}
-	return u, err
+	if err != nil {
+		return repo.User{}, err
+	}
+	return u, nil
 }
 
 type UserPatch struct {
@@ -448,6 +467,9 @@ func (s *Service) DeleteUser(ctx context.Context, id, actorID int64) error {
 // Register creates an account from the public signup form. With an invite
 // token the invite is consumed atomically with the user.
 func (s *Service) Register(ctx context.Context, in CreateUserInput, inviteToken string) (repo.User, error) {
+	if !s.cfg.LocalLogin {
+		return repo.User{}, ErrLocalLoginDisabled
+	}
 	if inviteToken == "" {
 		open, err := s.OpenRegistration(ctx)
 		if err != nil {
@@ -494,7 +516,13 @@ func (s *Service) Register(ctx context.Context, in CreateUserInput, inviteToken 
 }
 
 func (s *Service) validInvite(ctx context.Context, token string) (repo.Invite, error) {
-	inv, err := s.store.Invites().GetByHash(ctx, auth.HashToken(token))
+	return s.validInviteHash(ctx, auth.HashToken(token))
+}
+
+// validInviteHash is validInvite for flows that only carry the token hash,
+// like SSO state stored across the redirect to the provider.
+func (s *Service) validInviteHash(ctx context.Context, hash []byte) (repo.Invite, error) {
+	inv, err := s.store.Invites().GetByHash(ctx, hash)
 	if errors.Is(err, repo.ErrNotFound) {
 		return repo.Invite{}, ErrInvalidInvite
 	}

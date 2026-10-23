@@ -34,13 +34,17 @@ const rootRoute = createRootRouteWithContext<Ctx>()({
 const loginRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/login',
-  validateSearch: z.object({ session: z.string().optional(), redirect: z.string().optional() }),
+  validateSearch: z.object({
+    session: z.string().optional(),
+    redirect: z.string().optional(),
+    error: z.string().optional(),
+  }),
   component: LoginPage,
 })
 const registerRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/register',
-  validateSearch: z.object({ invite: z.string().optional() }),
+  validateSearch: z.object({ invite: z.string().optional(), error: z.string().optional() }),
   component: RegisterPage,
 })
 
@@ -75,6 +79,7 @@ const indexRoute = createRoute({
 const accountRoute = createRoute({
   getParentRoute: () => appRoute,
   path: '/account',
+  validateSearch: z.object({ error: z.string().optional() }),
   component: AccountPage,
 })
 const groupsRoute = createRoute({

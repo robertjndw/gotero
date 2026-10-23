@@ -18,7 +18,7 @@ var dist embed.FS
 
 // reserved prefixes never fall back to index.html, so API typos get a real
 // 404 instead of an HTML page that confuses clients.
-var reserved = []string{"/api", "/admin/api", "/stream", "/files", "/healthz"}
+var reserved = []string{"/api", "/admin/api", "/stream", "/files", "/healthz", "/auth"}
 
 // Handler serves static assets and falls back to index.html for client-side
 // routes. It is meant to be installed as the engine's NoRoute handler.

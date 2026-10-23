@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
@@ -30,6 +30,7 @@ import {
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Field, usePageTitle } from '@/components/common'
+import { SsoButtons } from '@/components/sso'
 import { toast } from 'sonner'
 
 const schema = z.object({
@@ -38,9 +39,23 @@ const schema = z.object({
 })
 type Values = z.infer<typeof schema>
 
-function LoginForm() {
+function LoginForm({
+  session,
+  redirect,
+  error,
+}: {
+  session?: string
+  redirect?: string
+  error?: string
+}) {
   const login = useLogin()
   const setup = useSetup()
+  const providers = setup.data?.providers ?? []
+  // Assume local login is on until /setup says otherwise so the form does not flicker away.
+  const localLogin = setup.data?.localLogin ?? true
+  // Admins can still use passwords when local login is off, so the form stays reachable.
+  const [adminOpen, setAdminOpen] = useState(false)
+  const showForm = localLogin || adminOpen
   const {
     register,
     handleSubmit,
@@ -53,54 +68,70 @@ function LoginForm() {
         <CardTitle className="text-xl">Log in</CardTitle>
         <CardDescription>Use your gotero account.</CardDescription>
       </CardHeader>
-      <form onSubmit={handleSubmit((v) => login.mutate(v))} noValidate>
-        <CardContent className="grid gap-4">
-          {login.error && (
-            <Alert variant="destructive">
-              <AlertDescription>
-                {login.error instanceof ApiError && login.error.status === 401
-                  ? 'Invalid username or password.'
-                  : errorMessage(login.error)}
-              </AlertDescription>
-            </Alert>
-          )}
-          <Field label="Username" htmlFor="username" error={errors.username?.message}>
-            <Input
-              id="username"
-              autoComplete="username"
-              autoFocus
-              aria-invalid={!!errors.username}
-              {...register('username')}
-            />
-          </Field>
-          <Field label="Password" htmlFor="password" error={errors.password?.message}>
-            <Input
-              id="password"
-              type="password"
-              autoComplete="current-password"
-              aria-invalid={!!errors.password}
-              {...register('password')}
-            />
-          </Field>
-        </CardContent>
-        <CardFooter className="mt-6 flex-col items-stretch gap-3">
-          <Button type="submit" disabled={login.isPending}>
-            {login.isPending ? 'Logging in...' : 'Log in'}
+      <SsoButtons
+        providers={providers}
+        error={error}
+        verb="Log in with"
+        params={{ session, redirect }}
+        divider={showForm ? 'or use a password' : undefined}
+        className={showForm ? 'mb-4' : undefined}
+      />
+      {!showForm ? (
+        <CardFooter className="mt-3 justify-center">
+          <Button type="button" variant="link" size="sm" onClick={() => setAdminOpen(true)}>
+            Administrator sign-in
           </Button>
-          {setup.data?.openRegistration && (
-            <p className="text-center text-sm text-muted-foreground">
-              No account yet?{' '}
-              <Link
-                to="/register"
-                search={{}}
-                className="text-primary underline-offset-4 hover:underline"
-              >
-                Register
-              </Link>
-            </p>
-          )}
         </CardFooter>
-      </form>
+      ) : (
+        <form onSubmit={handleSubmit((v) => login.mutate(v))} noValidate>
+          <CardContent className="grid gap-4">
+            {login.error && (
+              <Alert variant="destructive">
+                <AlertDescription>
+                  {login.error instanceof ApiError && login.error.status === 401
+                    ? 'Invalid username or password.'
+                    : errorMessage(login.error)}
+                </AlertDescription>
+              </Alert>
+            )}
+            <Field label="Username" htmlFor="username" error={errors.username?.message}>
+              <Input
+                id="username"
+                autoComplete="username"
+                autoFocus
+                aria-invalid={!!errors.username}
+                {...register('username')}
+              />
+            </Field>
+            <Field label="Password" htmlFor="password" error={errors.password?.message}>
+              <Input
+                id="password"
+                type="password"
+                autoComplete="current-password"
+                aria-invalid={!!errors.password}
+                {...register('password')}
+              />
+            </Field>
+          </CardContent>
+          <CardFooter className="mt-6 flex-col items-stretch gap-3">
+            <Button type="submit" disabled={login.isPending}>
+              {login.isPending ? 'Logging in...' : 'Log in'}
+            </Button>
+            {localLogin && setup.data?.openRegistration && (
+              <p className="text-center text-sm text-muted-foreground">
+                No account yet?{' '}
+                <Link
+                  to="/register"
+                  search={{}}
+                  className="text-primary underline-offset-4 hover:underline"
+                >
+                  Register
+                </Link>
+              </p>
+            )}
+          </CardFooter>
+        </form>
+      )}
     </Card>
   )
 }
@@ -265,7 +296,7 @@ function SessionView({
 
 export default function LoginPage() {
   usePageTitle('Log in')
-  const { session, redirect } = useSearch({ from: '/login' })
+  const { session, redirect, error } = useSearch({ from: '/login' })
   const navigate = useNavigate()
   const { data: me, isLoading } = useMe()
 
@@ -291,7 +322,7 @@ export default function LoginPage() {
               Log in to connect your Zotero app.
             </p>
           )}
-          <LoginForm />
+          <LoginForm session={session} redirect={redirect} error={error} />
         </>
       )}
     </AuthLayout>

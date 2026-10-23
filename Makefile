@@ -1,6 +1,6 @@
 MODULES := . ./zotero ./zoteroclient ./storage ./conformance
 
-.PHONY: build test test-short lint web docker up down dev dev-down dev-reset
+.PHONY: build test test-short lint vuln web docker up down dev dev-down dev-reset
 
 build: web
 	CGO_ENABLED=0 go build -trimpath -o bin/gotero ./cmd/gotero
@@ -18,6 +18,11 @@ LINT_TOOLCHAIN ?= go1.26.5
 
 lint:
 	@for m in $(MODULES); do (cd $$m && GOTOOLCHAIN=$(LINT_TOOLCHAIN) golangci-lint run --config $(CURDIR)/.golangci.yml ./...) || exit 1; done
+
+# Kept out of lint: it reports advisories in dependencies we can't always
+# bump right away, but the SAML signature checks depend on goxmldsig being current.
+vuln:
+	@for m in $(MODULES); do (cd $$m && go run golang.org/x/vuln/cmd/govulncheck@latest ./...) || exit 1; done
 
 web:
 	@if [ -f web/package.json ]; then cd web && pnpm install --frozen-lockfile && pnpm build; fi

@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"iter"
 	"time"
 )
@@ -15,6 +16,12 @@ import (
 var (
 	ErrNotFound = errors.New("repo: not found")
 	ErrConflict = errors.New("repo: conflict") // unique violation, e.g. username taken
+	// These all match ErrConflict too. Use them when it matters which
+	// constraint fired.
+	ErrUsernameTaken     = fmt.Errorf("%w: username taken", ErrConflict)
+	ErrEmailTaken        = fmt.Errorf("%w: email taken", ErrConflict)
+	ErrIdentityLinked    = fmt.Errorf("%w: identity already linked", ErrConflict)
+	ErrInviteUnavailable = fmt.Errorf("%w: invite unknown, used or expired", ErrConflict)
 	// ErrBusy means a lock could not be acquired in time. The server maps it
 	// to 503 with Retry-After so clients back off instead of piling up.
 	ErrBusy = errors.New("repo: busy")
@@ -30,6 +37,8 @@ type Store interface {
 	LoginSessions() LoginSessionRepo
 	WebSessions() WebSessionRepo
 	Invites() InviteRepo
+	Identities() IdentityRepo
+	SSOStates() SSOStateRepo
 	Settings() InstanceSettingsRepo
 	Files() FileRepo
 	Imports() ImportRepo
@@ -258,6 +267,14 @@ type UserRepo interface {
 	CreateWithInvite(ctx context.Context, u User, inviteID int64, at time.Time) (User, error)
 	Get(ctx context.Context, id int64) (User, error)
 	GetByUsername(ctx context.Context, username string) (User, error)
+	// GetByEmail matches case-insensitively. ErrNotFound if no user has it.
+	GetByEmail(ctx context.Context, email string) (User, error)
+	// CreateExternal creates a user and its external identity in one
+	// transaction, claiming the invite too when inviteID is not zero. A
+	// failure of any part rolls back all of it. A conflict is reported as
+	// ErrUsernameTaken, ErrEmailTaken, ErrIdentityLinked or
+	// ErrInviteUnavailable where it can be told apart.
+	CreateExternal(ctx context.Context, u User, ident Identity, inviteID int64, at time.Time) (User, error)
 	List(ctx context.Context, q string, limit int, cursor int64) ([]User, error)
 	Update(ctx context.Context, u User) (User, error)
 	Delete(ctx context.Context, id int64) error
@@ -408,6 +425,65 @@ type InviteRepo interface {
 	// Use marks an unused, unexpired invite as used. ErrConflict otherwise.
 	Use(ctx context.Context, id, userID int64, at time.Time) error
 	Delete(ctx context.Context, id int64) error
+}
+
+// Single sign-on
+
+// Identity links a user to an account at an external identity provider.
+type Identity struct {
+	ID          int64
+	UserID      int64
+	Provider    string
+	Subject     string
+	Email       string // empty when the provider did not release one
+	CreatedAt   time.Time
+	LastLoginAt *time.Time
+}
+
+type IdentityRepo interface {
+	// Get returns ErrNotFound when (provider, subject) is not linked.
+	Get(ctx context.Context, provider, subject string) (Identity, error)
+	ListByUser(ctx context.Context, userID int64) ([]Identity, error)
+	// ProvidersByUsers maps each user ID to the providers it is linked to.
+	// Users without identities are absent from the result.
+	ProvidersByUsers(ctx context.Context, ids []int64) (map[int64][]string, error)
+	// Create returns ErrConflict if the external account is linked already or
+	// the user already has an identity for the provider.
+	Create(ctx context.Context, i Identity) (Identity, error)
+	// Touch records a login and refreshes the stored email.
+	Touch(ctx context.Context, id int64, email string, at time.Time) error
+	// Delete unlinks the provider from the user. ErrNotFound if not linked.
+	Delete(ctx context.Context, userID int64, provider string) error
+}
+
+// SSOState is the server-side state of one SSO round trip. IDHash and
+// BindingHash are hashes of secrets that only the browser holds.
+type SSOState struct {
+	IDHash       []byte
+	BindingHash  []byte
+	Provider     string
+	Nonce        string
+	PKCEVerifier string
+	RequestID    string
+	InviteHash   []byte
+	LinkUserID   *int64
+	ReturnTo     string
+	Identity     []byte // raw JSON stashed by the SAML ACS, nil until then
+	CreatedAt    time.Time
+	ExpiresAt    time.Time
+}
+
+type SSOStateRepo interface {
+	// Create ignores Identity and CreatedAt; only Stash sets the identity.
+	Create(ctx context.Context, s SSOState) error
+	// Get returns ErrNotFound for unknown or expired states.
+	Get(ctx context.Context, idHash []byte, now time.Time) (SSOState, error)
+	// Take deletes and returns an unexpired state in one statement, so a
+	// state can be redeemed only once. ErrNotFound otherwise.
+	Take(ctx context.Context, idHash []byte, now time.Time) (SSOState, error)
+	// Stash stores the identity and moves the expiry, but only while no
+	// identity is stored yet and the state is unexpired. ErrNotFound otherwise.
+	Stash(ctx context.Context, idHash []byte, identity []byte, newExpiry, now time.Time) error
 }
 
 type InstanceSettingsRepo interface {

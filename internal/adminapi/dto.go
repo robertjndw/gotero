@@ -30,38 +30,112 @@ func tsPtr(t *time.Time) *string {
 }
 
 type userDTO struct {
-	ID          int64   `json:"id"`
-	Username    string  `json:"username"`
-	DisplayName string  `json:"displayName"`
-	Email       string  `json:"email"`
-	IsAdmin     bool    `json:"isAdmin"`
-	Disabled    bool    `json:"disabled"`
-	QuotaBytes  *int64  `json:"quotaBytes"`
-	UsedBytes   int64   `json:"usedBytes"`
-	CreatedAt   string  `json:"createdAt"`
-	LastSyncAt  *string `json:"lastSyncAt"`
+	ID          int64    `json:"id"`
+	Username    string   `json:"username"`
+	DisplayName string   `json:"displayName"`
+	Email       string   `json:"email"`
+	IsAdmin     bool     `json:"isAdmin"`
+	Disabled    bool     `json:"disabled"`
+	QuotaBytes  *int64   `json:"quotaBytes"`
+	UsedBytes   int64    `json:"usedBytes"`
+	CreatedAt   string   `json:"createdAt"`
+	LastSyncAt  *string  `json:"lastSyncAt"`
+	HasPassword bool     `json:"hasPassword"`
+	Providers   []string `json:"providers"`
+}
+
+type identityDTO struct {
+	Provider     string  `json:"provider"`
+	ProviderName string  `json:"providerName"`
+	Kind         string  `json:"kind"`
+	Email        string  `json:"email"`
+	CreatedAt    string  `json:"createdAt"`
+	LastLoginAt  *string `json:"lastLoginAt"`
 }
 
 type meDTO struct {
 	userDTO
-	CSRFToken string `json:"csrfToken"`
+	CSRFToken  string        `json:"csrfToken"`
+	Identities []identityDTO `json:"identities"`
 }
 
 func (a *API) userDTO(ctx context.Context, u repo.User) (userDTO, error) {
+	ds, err := a.userDTOs(ctx, []repo.User{u})
+	if err != nil {
+		return userDTO{}, err
+	}
+	return ds[0], nil
+}
+
+// userDTOs builds DTOs for a list with one identity query instead of one
+// per user.
+func (a *API) userDTOs(ctx context.Context, users []repo.User) ([]userDTO, error) {
+	ids := make([]int64, 0, len(users))
+	for _, u := range users {
+		ids = append(ids, u.ID)
+	}
+	byUser, err := a.Store.Identities().ProvidersByUsers(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]userDTO, 0, len(users))
+	for _, u := range users {
+		d, err := a.userDTOWith(ctx, u, byUser[u.ID])
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, nil
+}
+
+func providerIDs(idents []repo.Identity) []string {
+	out := make([]string, 0, len(idents))
+	for _, i := range idents {
+		out = append(out, i.Provider)
+	}
+	return out
+}
+
+func (a *API) userDTOWith(ctx context.Context, u repo.User, providers []string) (userDTO, error) {
 	lib, err := a.Store.Library(ctx, u.LibraryID)
 	if err != nil {
 		return userDTO{}, err
+	}
+	if providers == nil {
+		providers = []string{}
 	}
 	return userDTO{
 		ID: u.ID, Username: u.Username, DisplayName: u.DisplayName, Email: u.Email,
 		IsAdmin: u.IsAdmin, Disabled: u.Disabled, QuotaBytes: u.QuotaBytes, UsedBytes: lib.StorageUsed(),
 		CreatedAt: ts(u.CreatedAt), LastSyncAt: tsPtr(u.LastSyncAt),
+		HasPassword: u.PasswordHash != "", Providers: providers,
 	}, nil
 }
 
 func (a *API) meDTO(ctx context.Context, u repo.User, csrf string) (meDTO, error) {
-	d, err := a.userDTO(ctx, u)
-	return meDTO{userDTO: d, CSRFToken: csrf}, err
+	idents, err := a.Store.Identities().ListByUser(ctx, u.ID)
+	if err != nil {
+		return meDTO{}, err
+	}
+	d, err := a.userDTOWith(ctx, u, providerIDs(idents))
+	if err != nil {
+		return meDTO{}, err
+	}
+	out := make([]identityDTO, 0, len(idents))
+	for _, i := range idents {
+		// A provider removed from the config still shows up so it can be
+		// unlinked; its name falls back to the id.
+		dto := identityDTO{
+			Provider: i.Provider, ProviderName: i.Provider, Email: i.Email,
+			CreatedAt: ts(i.CreatedAt), LastLoginAt: tsPtr(i.LastLoginAt),
+		}
+		if p, ok := a.SSO.Get(i.Provider); ok {
+			dto.ProviderName, dto.Kind = p.DisplayName(), string(p.Kind())
+		}
+		out = append(out, dto)
+	}
+	return meDTO{userDTO: d, CSRFToken: csrf, Identities: out}, nil
 }
 
 type keyDTO struct {

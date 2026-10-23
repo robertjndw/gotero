@@ -21,7 +21,7 @@ func TestMain(m *testing.M) { pgtest.Main(m) }
 func newTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	cfg := &config.Config{
-		Listen: ":0", Secret: strings.Repeat("s", 32), MaxRequestBytes: 1 << 20,
+		Listen: ":0", LocalLogin: true, Secret: strings.Repeat("s", 32), MaxRequestBytes: 1 << 20,
 		Storage: config.Storage{Backend: "local", LocalPath: t.TempDir()},
 	}
 	s, err := New(context.Background(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), pgtest.New(t))
@@ -60,6 +60,9 @@ func TestRoutes(t *testing.T) {
 		"/":                   http.StatusOK,
 		"/groups/12":          http.StatusOK, // SPA route
 		"/api/does/not/exist": http.StatusNotFound,
+		// /auth is reserved: unknown routes are 404, not the SPA index.
+		"/auth/unknown":            http.StatusNotFound,
+		"/auth/saml/nope/metadata": http.StatusNotFound, // route is registered
 	} {
 		req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+path, nil)
 		resp, err := http.DefaultClient.Do(req)

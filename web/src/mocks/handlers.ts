@@ -15,7 +15,12 @@ const fail = (status: number, code: string, message: string, fields?: Record<str
   respond({ error: { code, message, ...(fields ? { fields } : {}) } }, status)
 
 const current = () => db.users.find((u) => u.id === db.sessionUserId) ?? null
-const me = (u: User) => ({ ...u, csrfToken: db.csrf })
+const me = (u: User) => ({ ...u, csrfToken: db.csrf, identities: db.identities[u.id] ?? [] })
+
+function removeIdentity(user: User, provider: string) {
+  db.identities[user.id] = (db.identities[user.id] ?? []).filter((i) => i.provider !== provider)
+  user.providers = user.providers.filter((p) => p !== provider)
+}
 
 type Ctx = { request: Request; params: Record<string, string | readonly string[] | undefined> }
 type Auth = { user: User }
@@ -74,6 +79,8 @@ export const handlers: HttpHandler[] = [
       openRegistration: db.settings.openRegistration,
       publicUrl: db.publicUrl,
       version: '0.1.0-mock',
+      localLogin: db.localLogin,
+      providers: db.providers,
     }),
   ),
 
@@ -106,13 +113,33 @@ export const handlers: HttpHandler[] = [
   http.post(
     `${B}/me/password`,
     authed(async ({ request }, { user }) => {
-      const b = await body<{ currentPassword: string; newPassword: string }>(request)
-      if (db.passwords[user.id] !== b.currentPassword) {
+      const b = await body<{ currentPassword?: string; newPassword: string }>(request)
+      if (!user.isAdmin && !db.localLogin) {
+        return fail(403, 'local_login_disabled', 'Password sign-in is disabled.')
+      }
+      // Mirrors the contract: the current password is only checked when one exists.
+      if (user.hasPassword && db.passwords[user.id] !== b.currentPassword) {
         return fail(422, 'validation', 'Validation failed.', {
           currentPassword: 'Current password is incorrect.',
         })
       }
       db.passwords[user.id] = b.newPassword
+      user.hasPassword = true
+      return respond(undefined, 204)
+    }),
+  ),
+  http.delete(
+    `${B}/me/identities/:provider`,
+    authed(({ params }, { user }) => {
+      const provider = str(params.provider)
+      const list = db.identities[user.id] ?? []
+      if (!list.some((i) => i.provider === provider)) {
+        return fail(404, 'not_found', 'Identity not found.')
+      }
+      if (!user.hasPassword && list.length <= 1) {
+        return fail(409, 'last_login_method', 'You cannot remove your only way to sign in.')
+      }
+      removeIdentity(user, provider)
       return respond(undefined, 204)
     }),
   ),
@@ -144,6 +171,8 @@ export const handlers: HttpHandler[] = [
       usedBytes: 0,
       createdAt: new Date().toISOString(),
       lastSyncAt: null,
+      hasPassword: true,
+      providers: [],
     }
     db.users.push(u)
     db.passwords[u.id] = b.password
@@ -285,6 +314,8 @@ export const handlers: HttpHandler[] = [
         usedBytes: 0,
         createdAt: new Date().toISOString(),
         lastSyncAt: null,
+        hasPassword: true,
+        providers: [],
       }
       db.users.push(u)
       db.passwords[u.id] = b.password
@@ -304,10 +335,20 @@ export const handlers: HttpHandler[] = [
     }),
   ),
   http.delete(
+    `${B}/admin/users/:id/identities/:provider`,
+    admin(({ params }) => {
+      const u = db.users.find((x) => x.id === num(params.id))
+      if (!u) return fail(404, 'not_found', 'User not found.')
+      removeIdentity(u, str(params.provider))
+      return respond(undefined, 204)
+    }),
+  ),
+  http.delete(
     `${B}/admin/users/:id`,
     admin(({ params }, { user }) => {
       const id = num(params.id)
-      if (id === user.id) return fail(409, 'self_modification', 'You cannot delete your own account.')
+      if (id === user.id)
+        return fail(409, 'self_modification', 'You cannot delete your own account.')
       db.users = db.users.filter((u) => u.id !== id)
       return respond(undefined, 204)
     }),

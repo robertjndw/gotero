@@ -17,6 +17,7 @@ This is the API the web UI uses. It is separate from the Zotero API and is mount
   - Invite links have the form `{publicUrl}/register?invite=TOKEN`, and `TOKEN` is the value accepted by `GET /invites/{token}` and `POST /register`.
   - Login-session tokens are the `session` query value from the Zotero client's `loginURL`.
 - **Expiry is decided by the server:** a pending login session past `expiresAt` is reported with status `expired`.
+- **Local login:** when `GOTERO_LOCAL_LOGIN=false`, password sign-in only works for instance admins. For everyone else a correct password gets the same 401 as a wrong one, so the response never confirms a password. Password signup and password changes for non-admins get 403 `local_login_disabled`.
 - **Self-protection:** an instance admin cannot delete, disable or demote themselves, and the last remaining admin cannot be removed. Both get 409 `last_admin` or `self_modification`.
 
 ## Types
@@ -26,8 +27,15 @@ type User = {
   isAdmin: boolean; disabled: boolean;
   quotaBytes: number | null; usedBytes: number;
   createdAt: string; lastSyncAt: string | null;
+  hasPassword: boolean;                              // false for SSO-only accounts
+  providers: string[];                               // ids of linked SSO providers
 };
-type Me = User & { csrfToken: string };
+type Identity = {                                    // a linked SSO login
+  provider: string; providerName: string; kind: "oidc" | "saml";
+  email: string; createdAt: string; lastLoginAt: string | null;
+};
+type SsoProvider = { id: string; kind: "oidc" | "saml"; displayName: string; startUrl: string };
+type Me = User & { csrfToken: string; identities: Identity[] };
 type ApiKey = {
   id: number; name: string; prefix: string;           // first 4 chars, for recognition
   access: { library: boolean; notes: boolean; write: boolean; files: boolean; groups: "all" | "none" | "read" };
@@ -70,15 +78,16 @@ type ImportJob = {
 | POST | `/login` | `{username, password}` | `Me` (sets the cookie). 401 on bad credentials. |
 | POST | `/logout` | | 204 |
 | GET | `/me` | | `Me` |
-| GET | `/setup` | (public) | `{openRegistration: boolean, publicUrl: string, version: string}` |
-| POST | `/register` | `{username, password, email, displayName, inviteToken?}` (public) | `Me`. Needs an invite token unless open registration is on. |
+| GET | `/setup` | (public) | `{openRegistration: boolean, publicUrl: string, version: string, localLogin: boolean, providers: SsoProvider[]}` |
+| POST | `/register` | `{username, password, email, displayName, inviteToken?}` (public) | `Me`. Needs an invite token unless open registration is on. 403 `local_login_disabled` when local login is off. |
 | GET | `/invites/{token}` | (public) | `{valid: boolean, email: string \| null}` |
 
 ### Account (current user)
 | Method | Path | Body | Response |
 |---|---|---|---|
 | PATCH | `/me` | `{displayName?, email?}` | `Me` |
-| POST | `/me/password` | `{currentPassword, newPassword}` | 204 |
+| POST | `/me/password` | `{currentPassword?, newPassword}` | 204. `currentPassword` may be omitted when `hasPassword` is false. 403 `local_login_disabled` for non-admins when local login is off. |
+| DELETE | `/me/identities/{provider}` | | 204. 409 `last_login_method` if this would leave no way to sign in. |
 | GET | `/me/keys` | | `{items: ApiKey[]}` |
 | POST | `/me/keys` | `{name, access}` | `ApiKey & {key: string}` (the full key is shown once) |
 | DELETE | `/me/keys/{id}` | | 204 |
@@ -101,6 +110,7 @@ The Zotero client opens `{publicUrl}/login?session=TOKEN`, a page served by the 
 | POST | `/admin/users` | `{username, password, email, displayName, isAdmin, quotaBytes}` | `User` |
 | PATCH | `/admin/users/{id}` | `{displayName?, email?, isAdmin?, disabled?, quotaBytes?, password?}` | `User` |
 | DELETE | `/admin/users/{id}` | | 204 (deletes the user's library and files) |
+| DELETE | `/admin/users/{id}/identities/{provider}` | | 204 |
 | GET | `/admin/invites` | | page of `Invite` |
 | POST | `/admin/invites` | `{email?, isAdmin, expiresInHours}` | `Invite` |
 | DELETE | `/admin/invites/{id}` | | 204 |
@@ -128,3 +138,38 @@ The Zotero client opens `{publicUrl}/login?session=TOKEN`, a page served by the 
 | POST | `/imports` | `{apiKey, includeGroups: boolean, includeFiles: boolean}` | `ImportJob`. 422 if zotero.org rejects the key. |
 | GET | `/imports/{id}` | | `ImportJob` |
 | POST | `/imports/{id}/cancel` | | `ImportJob` |
+
+## Single sign-on (outside `/admin/api`)
+
+SSO endpoints live under `/auth` because their URLs are registered at the identity provider and they answer with browser redirects, not JSON. The SPA never calls them with `fetch`; it links to `startUrl` from `/setup` with a full page navigation.
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/auth/oidc/{provider}/start` | Redirects to the IdP. |
+| GET | `/auth/oidc/{provider}/callback` | Redirect URI to register at the IdP. |
+| GET | `/auth/saml/{provider}/start` | Redirects to the IdP (HTTP-Redirect binding). |
+| POST | `/auth/saml/{provider}/acs` | Assertion consumer service (HTTP-POST binding). |
+| GET | `/auth/saml/{provider}/finish` | Internal second hop after the ACS. |
+| GET | `/auth/saml/{provider}/metadata` | SP metadata XML for the IdP. |
+
+`start` accepts these query parameters:
+- `invite=TOKEN`: sign up through an invite. The invite's email, if any, must match the IdP's verified email.
+- `session=TOKEN`: a Zotero client login session; on success the browser lands on `/login?session=TOKEN` to approve it.
+- `redirect=/path`: a same-origin path to land on after login. Anything not starting with a single `/` is ignored.
+- `link=1`: connect the provider to the account that is currently logged in. Needs a session; lands on `/account`.
+
+On failure the browser is redirected to `/login?error=CODE` (`/register?invite=TOKEN&error=CODE` for invite signups, `/account?error=CODE` for `link=1`). Details are only logged server-side. Codes:
+
+| Code | Meaning |
+|---|---|
+| `sso_failed` | The IdP returned an error or its response failed validation. |
+| `sso_state` | The login attempt expired, was replayed, or was started in another browser. |
+| `unknown_provider` | No provider with that id. |
+| `no_account` | No linked account and the provider doesn't create accounts. |
+| `disabled` | The account is disabled. |
+| `invalid_invite` | The invite is unknown, used or expired. |
+| `invite_email_mismatch` | The IdP's email doesn't match the invite. |
+| `link_required` | An account with this email already exists; sign in to it and connect the provider from the account page. |
+| `identity_in_use` | That IdP account is already linked to another user, or this user already has one for the provider. |
+
+SSO never grants or removes instance admin rights. New accounts created through SSO are regular users unless they come from an admin invite, and email-based linking never attaches an IdP identity to an existing admin; admins connect providers explicitly with `link=1`.

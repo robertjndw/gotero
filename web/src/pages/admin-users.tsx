@@ -3,9 +3,10 @@ import { Controller, useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { toast } from 'sonner'
-import { Pencil, Plus, Search, Trash2 } from 'lucide-react'
+import { Pencil, Plus, Search, Trash2, Unlink } from 'lucide-react'
 import {
   errorMessage,
+  useAdminUnlinkIdentity,
   useAdminUsers,
   useCreateUser,
   useDeleteUser,
@@ -54,6 +55,7 @@ import {
   PageHeader,
 } from '@/components/common'
 import { QuotaInput } from '@/components/quota-input'
+import { useProviderName } from '@/components/sso'
 
 const createSchema = z.object({
   username: z
@@ -231,6 +233,44 @@ function EditUserSheet({
   )
 }
 
+function ProviderList({ user }: { user: User }) {
+  const unlink = useAdminUnlinkIdentity()
+  const name = useProviderName()
+  return (
+    <div className="grid gap-2">
+      <p className="text-sm font-medium">Single sign-on</p>
+      <ul className="divide-y rounded-md border">
+        {user.providers.map((id) => (
+          <li key={id} className="flex items-center justify-between gap-3 p-2 pl-3">
+            <span className="truncate text-sm">{name(id)}</span>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              aria-label={`Unlink ${name(id)}`}
+              disabled={unlink.isPending}
+              onClick={() =>
+                unlink.mutate(
+                  { userId: user.id, provider: id },
+                  {
+                    onSuccess: () => toast.success(`${name(id)} unlinked from @${user.username}`),
+                    onError: (e) => toast.error(errorMessage(e)),
+                  },
+                )
+              }
+            >
+              <Unlink /> Unlink
+            </Button>
+          </li>
+        ))}
+      </ul>
+      <p className="text-xs text-muted-foreground">
+        Signing in with SSO never changes admin rights.
+      </p>
+    </div>
+  )
+}
+
 function EditForm({
   user,
   isSelf,
@@ -341,6 +381,7 @@ function EditForm({
             </div>
           )}
         />
+        {user.providers.length > 0 && <ProviderList user={user} />}
         <Field
           label="Reset password"
           htmlFor="e-password"
@@ -376,6 +417,7 @@ export default function UsersPage() {
     return () => clearTimeout(t)
   }, [q])
   const users = useAdminUsers(debounced)
+  const providerName = useProviderName()
   const del = useDeleteUser()
   const [creating, setCreating] = useState(false)
   const [editing, setEditing] = useState<User | null>(null)
@@ -432,6 +474,11 @@ export default function UsersPage() {
                       <span className="font-medium">{u.displayName || u.username}</span>
                       {u.isAdmin && <Badge>Admin</Badge>}
                       {u.disabled && <Badge variant="destructive">Disabled</Badge>}
+                      {u.providers.map((id) => (
+                        <Badge key={id} variant="outline">
+                          {providerName(id)}
+                        </Badge>
+                      ))}
                     </div>
                     <p className="text-xs text-muted-foreground">
                       @{u.username} - {u.email}
@@ -473,7 +520,8 @@ export default function UsersPage() {
       )}
       <CreateUserDialog open={creating} onOpenChange={setCreating} />
       <EditUserSheet
-        user={editing}
+        // Read from the list so an unlink shows up without reopening the sheet.
+        user={users.data?.items.find((u) => u.id === editing?.id) ?? editing}
         isSelf={editing?.id === me?.id}
         onClose={() => setEditing(null)}
       />

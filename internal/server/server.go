@@ -23,6 +23,7 @@ import (
 	"github.com/robertjndw/gotero/internal/importer"
 	"github.com/robertjndw/gotero/internal/jobs"
 	"github.com/robertjndw/gotero/internal/repo/pg"
+	"github.com/robertjndw/gotero/internal/sso"
 	"github.com/robertjndw/gotero/internal/stream"
 	"github.com/robertjndw/gotero/internal/version"
 	"github.com/robertjndw/gotero/internal/webui"
@@ -106,6 +107,10 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, pool *pgxpoo
 	// API keys: Zotero follows download redirects without the key.
 	api.RegisterFileRoutes(engine.Group("/files"))
 
+	ssoReg, err := sso.New(cfg, log)
+	if err != nil {
+		return nil, err
+	}
 	admin := adminapi.New(adminapi.Deps{
 		Store:           store,
 		Auth:            authn,
@@ -116,8 +121,10 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, pool *pgxpoo
 		GC:              runner,
 		Notifier:        hub,
 		ImportValidator: imports,
+		SSO:             ssoReg,
 	})
 	admin.Register(engine.Group("/admin/api"))
+	admin.RegisterSSO(engine.Group("/auth"))
 
 	engine.NoRoute(webui.Handler())
 
