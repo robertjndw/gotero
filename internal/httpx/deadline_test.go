@@ -51,6 +51,29 @@ func TestDeadlineWriterExtendsAtMostOncePerSecond(t *testing.T) {
 	}
 }
 
+// orderRecorder notes how many deadlines were set when each write arrived.
+type orderRecorder struct {
+	deadlineRecorder
+	atWrite []int
+}
+
+func (r *orderRecorder) Write(p []byte) (int, error) {
+	r.atWrite = append(r.atWrite, len(r.deadlines))
+	return r.ResponseRecorder.Write(p)
+}
+
+// A slow query between flushes must not leave the next write with an
+// expired deadline.
+func TestDeadlineWriterExtendsBeforeWriting(t *testing.T) {
+	rec := &orderRecorder{deadlineRecorder: deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}}
+	dw := NewDeadlineWriter(rec, time.Minute)
+	dw.last = time.Now().Add(-2 * time.Minute)
+	_, _ = dw.Write([]byte("x"))
+	if len(rec.atWrite) != 1 || rec.atWrite[0] != 2 {
+		t.Fatalf("the deadline must be extended before the write reaches the connection, got %v", rec.atWrite)
+	}
+}
+
 func TestDeadlineWriterCutsStalledReader(t *testing.T) {
 	done := make(chan error, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

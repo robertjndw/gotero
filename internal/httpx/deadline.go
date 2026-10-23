@@ -74,13 +74,15 @@ func NewDeadlineWriter(rw http.ResponseWriter, idle time.Duration) *DeadlineWrit
 }
 
 func (d *DeadlineWriter) Write(p []byte) (int, error) {
-	n, err := d.w.Write(p)
-	// Same throttle as idleBody: one syscall per second, not per chunk.
-	if now := time.Now(); n > 0 && now.Sub(d.last) > time.Second {
+	// Extend before the write. If we just spent a minute waiting on a slow
+	// query, the old deadline is already gone and the write would fail even
+	// though the client is fine. Same throttle as idleBody: one syscall per
+	// second, not per chunk.
+	if now := time.Now(); now.Sub(d.last) > time.Second {
 		d.last = now
 		_ = d.rc.SetWriteDeadline(now.Add(d.idle))
 	}
-	return n, err
+	return d.w.Write(p)
 }
 
 // Release clears the deadline.
