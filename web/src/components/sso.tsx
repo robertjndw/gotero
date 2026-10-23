@@ -1,5 +1,6 @@
 import { AlertCircle } from 'lucide-react'
 import type { SsoProvider } from '@/lib/types'
+import { useSetup } from '@/lib/queries'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { CardContent } from '@/components/ui/card'
@@ -31,13 +32,18 @@ export function SsoErrorAlert({ code }: { code: string | undefined }) {
   )
 }
 
-// startUrl comes from the server and may already carry a query string.
 export function ssoHref(provider: SsoProvider, params: Record<string, string | undefined>) {
   const q = new URLSearchParams()
   for (const [k, v] of Object.entries(params)) if (v) q.set(k, v)
   const qs = q.toString()
-  if (!qs) return provider.startUrl
-  return provider.startUrl + (provider.startUrl.includes('?') ? '&' : '?') + qs
+  return qs ? `${provider.startUrl}?${qs}` : provider.startUrl
+}
+
+// Falls back to the id for providers that were removed from the config but
+// are still linked to someone.
+export function useProviderName() {
+  const { data } = useSetup()
+  return (id: string) => data?.providers.find((p) => p.id === id)?.displayName ?? id
 }
 
 // Error banner plus one button per provider. `divider` is shown under the

@@ -123,7 +123,7 @@ export function useUnlinkIdentity() {
   return useMutation({
     mutationFn: (provider: string) =>
       api<void>(`/me/identities/${encodeURIComponent(provider)}`, { method: 'DELETE' }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.me }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.me, exact: true }),
   })
 }
 

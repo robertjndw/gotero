@@ -11,6 +11,7 @@ import (
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/robertjndw/gotero/internal/config"
 )
@@ -22,9 +23,12 @@ type oidcProvider struct {
 	log    *slog.Logger
 
 	// Discovery happens on first use and is retried after a failure, so the
-	// IdP being down at startup only breaks its own login button.
+	// IdP being down at startup only breaks its own login button. The fetch
+	// runs outside mu and is shared by concurrent callers, so a slow IdP
+	// costs one timeout rather than one per queued login.
 	mu       sync.Mutex
 	provider *oidc.Provider
+	fetch    singleflight.Group
 }
 
 func newOIDC(publicURL string, c config.OIDCProvider, log *slog.Logger) *oidcProvider {
@@ -55,16 +59,27 @@ func (p *oidcProvider) ctx(ctx context.Context) context.Context {
 // discover returns the cached provider, running discovery if needed.
 func (p *oidcProvider) discover(ctx context.Context) (*oidc.Provider, error) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.provider != nil {
-		return p.provider, nil
+	prov := p.provider
+	p.mu.Unlock()
+	if prov != nil {
+		return prov, nil
 	}
-	prov, err := oidc.NewProvider(p.ctx(ctx), p.cfg.Issuer)
+	v, err, _ := p.fetch.Do("", func() (any, error) {
+		// Detached from the caller so one canceled login does not fail the
+		// others waiting on the same fetch; the client timeout still applies.
+		prov, err := oidc.NewProvider(p.ctx(context.WithoutCancel(ctx)), p.cfg.Issuer)
+		if err != nil {
+			return nil, fmt.Errorf("oidc %s: discovery: %w", p.cfg.Name, err)
+		}
+		p.mu.Lock()
+		p.provider = prov
+		p.mu.Unlock()
+		return prov, nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("oidc %s: discovery: %w", p.cfg.Name, err)
+		return nil, err
 	}
-	p.provider = prov
-	return prov, nil
+	return v.(*oidc.Provider), nil
 }
 
 // config returns the oauth2 config with the discovered endpoint.
@@ -145,12 +160,7 @@ func (p *oidcProvider) Exchange(ctx context.Context, code, nonce, pkceVerifier s
 			}
 		}
 	}
-	if id.Email != "" && p.cfg.TrustEmail {
-		id.EmailVerified = true
-	}
-	if id.Email == "" {
-		id.EmailVerified = false
-	}
+	id.EmailVerified = id.Email != "" && (id.EmailVerified || p.cfg.TrustEmail)
 	id.Username, _ = claims[p.cfg.UsernameClaim].(string)
 	id.DisplayName, _ = claims["name"].(string)
 	return id, nil

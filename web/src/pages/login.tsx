@@ -74,6 +74,7 @@ function LoginForm({
         verb="Log in with"
         params={{ session, redirect }}
         divider={showForm ? 'or use a password' : undefined}
+        className={showForm ? 'mb-4' : undefined}
       />
       {!showForm ? (
         <CardFooter className="mt-3 justify-center">
@@ -83,7 +84,7 @@ function LoginForm({
         </CardFooter>
       ) : (
         <form onSubmit={handleSubmit((v) => login.mutate(v))} noValidate>
-          <CardContent className={`grid gap-4${error || providers.length > 0 ? ' mt-4' : ''}`}>
+          <CardContent className="grid gap-4">
             {login.error && (
               <Alert variant="destructive">
                 <AlertDescription>

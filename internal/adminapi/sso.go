@@ -39,9 +39,9 @@ const (
 func (a *API) RegisterSSO(r gin.IRouter) {
 	r.Use(a.noStore)
 
-	r.GET("/oidc/:provider/start", a.ssoHandle(func(c *gin.Context) error { return a.ssoStart(c, sso.KindOIDC) }))
+	r.GET("/oidc/:provider/start", a.ssoHandle(func(c *gin.Context) error { return ssoStart[sso.OIDC](a, c) }))
 	r.GET("/oidc/:provider/callback", a.ssoHandle(a.oidcCallback))
-	r.GET("/saml/:provider/start", a.ssoHandle(func(c *gin.Context) error { return a.ssoStart(c, sso.KindSAML) }))
+	r.GET("/saml/:provider/start", a.ssoHandle(func(c *gin.Context) error { return ssoStart[sso.SAML](a, c) }))
 	r.POST("/saml/:provider/acs", a.ssoHandle(a.samlACS))
 	r.GET("/saml/:provider/finish", a.ssoHandle(a.samlFinish))
 	r.GET("/saml/:provider/metadata", a.handle(a.samlMetadata))
@@ -81,18 +81,18 @@ func (a *API) ssoFail(c *gin.Context, st *repo.SSOState, code string, cause erro
 	c.Redirect(http.StatusSeeOther, target)
 }
 
-func (a *API) provider(c *gin.Context, kind sso.Kind) (sso.Provider, bool) {
-	p, ok := a.SSO.Get(c.Param("provider"))
-	if !ok || p.Kind() != kind {
-		return nil, false
-	}
-	return p, true
+// providerAs looks up the provider named in the path and requires it to be
+// a T, so an OIDC route never serves a SAML provider or the other way round.
+func providerAs[T sso.Provider](a *API, c *gin.Context) (T, bool) {
+	p, _ := a.SSO.Get(c.Param("provider"))
+	t, ok := p.(T)
+	return t, ok
 }
 
-// providerOrRedirect is provider for the browser-facing flow endpoints: an
+// providerOrRedirect is providerAs for the browser-facing flow endpoints: an
 // unknown name sends the user back to the login page.
-func (a *API) providerOrRedirect(c *gin.Context, kind sso.Kind) (sso.Provider, bool) {
-	p, ok := a.provider(c, kind)
+func providerOrRedirect[T sso.Provider](a *API, c *gin.Context) (T, bool) {
+	p, ok := providerAs[T](a, c)
 	if !ok {
 		c.Redirect(http.StatusSeeOther, "/login?error=unknown_provider")
 	}
@@ -132,11 +132,7 @@ func isTokenChars(s string) bool {
 }
 
 func (a *API) setSSOCookie(c *gin.Context, name, value string, maxAge int) {
-	//nolint:gosec // Secure follows the public URL scheme; plain http is allowed for local setups.
-	http.SetCookie(c.Writer, &http.Cookie{
-		Name: name, Value: value, Path: ssoCookiePath, MaxAge: maxAge, HttpOnly: true,
-		Secure: a.secureCookies(c), SameSite: http.SameSiteLaxMode,
-	})
+	a.writeCookie(c, &http.Cookie{Name: name, Value: value, Path: ssoCookiePath, MaxAge: maxAge})
 }
 
 func (a *API) clearSSOCookies(c *gin.Context) {
@@ -166,9 +162,9 @@ func (a *API) inviteFromCookie(c *gin.Context, st *repo.SSOState) (string, bool)
 	return v, true
 }
 
-func (a *API) ssoStart(c *gin.Context, kind sso.Kind) error {
+func ssoStart[T sso.Provider](a *API, c *gin.Context) error {
 	ctx := c.Request.Context()
-	p, ok := a.providerOrRedirect(c, kind)
+	p, ok := providerOrRedirect[T](a, c)
 	if !ok {
 		return nil
 	}
@@ -222,11 +218,10 @@ func (a *API) ssoStart(c *gin.Context, kind sso.Kind) error {
 		return err
 	}
 	st.IDHash = auth.HashToken(state)
-	now := a.Now()
-	st.CreatedAt, st.ExpiresAt = now, now.Add(ssoStateTTL)
+	st.ExpiresAt = a.Now().Add(ssoStateTTL)
 
 	var dest string
-	switch pv := p.(type) {
+	switch pv := any(p).(type) {
 	case sso.OIDC:
 		if st.Nonce, err = randomB64(32); err != nil {
 			return err
@@ -279,11 +274,10 @@ func (a *API) takeState(c *gin.Context, p sso.Provider) (*repo.SSOState, error) 
 }
 
 func (a *API) oidcCallback(c *gin.Context) error {
-	p, ok := a.providerOrRedirect(c, sso.KindOIDC)
+	p, ok := providerOrRedirect[sso.OIDC](a, c)
 	if !ok {
 		return nil
 	}
-	o := p.(sso.OIDC)
 	st, err := a.takeState(c, p)
 	if st == nil {
 		return err
@@ -297,7 +291,7 @@ func (a *API) oidcCallback(c *gin.Context) error {
 		a.ssoFail(c, st, "sso_failed", errors.New("missing code"))
 		return nil
 	}
-	ident, err := o.Exchange(c.Request.Context(), code, st.Nonce, st.PKCEVerifier)
+	ident, err := p.Exchange(c.Request.Context(), code, st.Nonce, st.PKCEVerifier)
 	if err != nil {
 		a.ssoFail(c, st, "sso_failed", err)
 		return nil
@@ -309,13 +303,12 @@ func (a *API) oidcCallback(c *gin.Context) error {
 // validates the response and parks the identity on the flow state; the
 // follow-up GET to finish carries the cookie and does the actual login.
 func (a *API) samlACS(c *gin.Context) error {
-	p, ok := a.providerOrRedirect(c, sso.KindSAML)
+	p, ok := providerOrRedirect[sso.SAML](a, c)
 	if !ok {
 		return nil
 	}
-	s := p.(sso.SAML)
 	ctx := c.Request.Context()
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20)
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, sso.MaxACSBody)
 	if err := c.Request.ParseForm(); err != nil {
 		a.ssoFail(c, nil, "sso_failed", err)
 		return nil
@@ -339,7 +332,7 @@ func (a *API) samlACS(c *gin.Context) error {
 		a.ssoFail(c, nil, "sso_state", errors.New("relay state does not match provider or was used"))
 		return nil
 	}
-	ident, err := s.ParseResponse(c.Request, st.RequestID)
+	ident, err := p.ParseResponse(c.Request, st.RequestID)
 	if err != nil {
 		a.ssoFail(c, &st, "sso_failed", err)
 		return nil
@@ -360,7 +353,7 @@ func (a *API) samlACS(c *gin.Context) error {
 }
 
 func (a *API) samlFinish(c *gin.Context) error {
-	p, ok := a.providerOrRedirect(c, sso.KindSAML)
+	p, ok := providerOrRedirect[sso.SAML](a, c)
 	if !ok {
 		return nil
 	}
@@ -381,11 +374,11 @@ func (a *API) samlFinish(c *gin.Context) error {
 }
 
 func (a *API) samlMetadata(c *gin.Context) error {
-	p, ok := a.provider(c, sso.KindSAML)
+	p, ok := providerAs[sso.SAML](a, c)
 	if !ok {
 		return errNotFound
 	}
-	md, err := p.(sso.SAML).Metadata(c.Request.Context())
+	md, err := p.Metadata(c.Request.Context())
 	if err != nil {
 		return err
 	}
@@ -417,10 +410,7 @@ func ssoErrorCode(err error) string {
 // to the signed-in user (link=1) or it signs the user in.
 func (a *API) completeSSO(c *gin.Context, p sso.Provider, st repo.SSOState, ident sso.Identity) error {
 	ctx := c.Request.Context()
-	ext := accounts.ExternalIdentity{
-		Provider: p.Name(), Subject: ident.Subject, Email: ident.Email,
-		EmailVerified: ident.EmailVerified, Username: ident.Username, DisplayName: ident.DisplayName,
-	}
+	ext := accounts.ExternalIdentity{Provider: p.Name(), Identity: ident}
 
 	if st.LinkUserID != nil {
 		// The session may have ended or switched users while the browser was

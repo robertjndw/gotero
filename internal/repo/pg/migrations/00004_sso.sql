@@ -10,10 +10,9 @@ CREATE TABLE user_identities (
     created_at    timestamptz NOT NULL DEFAULT now(),
     last_login_at timestamptz,
     UNIQUE (provider, subject),
+    -- Also serves lookups by user_id alone.
     UNIQUE (user_id, provider)
 );
-
-CREATE INDEX user_identities_user_idx ON user_identities (user_id);
 
 -- Server-side state of an SSO round trip. Only hashes of the state value and
 -- the browser binding cookie are stored.
@@ -27,7 +26,9 @@ CREATE TABLE sso_states (
     invite_hash   bytea,
     link_user_id  bigint REFERENCES users (id) ON DELETE CASCADE,
     return_to     text  NOT NULL DEFAULT '',
-    identity      jsonb,
+    -- JSON-encoded sso.Identity, kept between the SAML ACS and the finish
+    -- redirect. SQL never looks inside it.
+    identity      bytea,
     created_at    timestamptz NOT NULL DEFAULT now(),
     expires_at    timestamptz NOT NULL
 );

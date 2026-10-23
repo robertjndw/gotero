@@ -69,7 +69,8 @@ func (a *API) adminCreateUser(c *gin.Context) error {
 	if err != nil {
 		return err
 	}
-	d, err := a.userDTO(c.Request.Context(), u)
+	// A user created a moment ago has no linked identities yet.
+	d, err := a.userDTOWith(c.Request.Context(), u, nil)
 	if err != nil {
 		return err
 	}

@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"iter"
 	"time"
 )
@@ -15,6 +16,12 @@ import (
 var (
 	ErrNotFound = errors.New("repo: not found")
 	ErrConflict = errors.New("repo: conflict") // unique violation, e.g. username taken
+	// These all match ErrConflict too. Use them when it matters which
+	// constraint fired.
+	ErrUsernameTaken     = fmt.Errorf("%w: username taken", ErrConflict)
+	ErrEmailTaken        = fmt.Errorf("%w: email taken", ErrConflict)
+	ErrIdentityLinked    = fmt.Errorf("%w: identity already linked", ErrConflict)
+	ErrInviteUnavailable = fmt.Errorf("%w: invite unknown, used or expired", ErrConflict)
 	// ErrBusy means a lock could not be acquired in time. The server maps it
 	// to 503 with Retry-After so clients back off instead of piling up.
 	ErrBusy = errors.New("repo: busy")
@@ -262,9 +269,9 @@ type UserRepo interface {
 	GetByEmail(ctx context.Context, email string) (User, error)
 	// CreateExternal creates a user and its external identity in one
 	// transaction, claiming the invite too when inviteID is not zero. A
-	// failure of any part rolls back all of it. ErrConflict covers a taken
-	// username or email, an identity that is already linked, and an invite
-	// that is unknown, used or expired.
+	// failure of any part rolls back all of it. A conflict is reported as
+	// ErrUsernameTaken, ErrEmailTaken, ErrIdentityLinked or
+	// ErrInviteUnavailable where it can be told apart.
 	CreateExternal(ctx context.Context, u User, ident Identity, inviteID int64, at time.Time) (User, error)
 	List(ctx context.Context, q string, limit int, cursor int64) ([]User, error)
 	Update(ctx context.Context, u User) (User, error)
@@ -465,6 +472,7 @@ type SSOState struct {
 }
 
 type SSOStateRepo interface {
+	// Create ignores Identity and CreatedAt; only Stash sets the identity.
 	Create(ctx context.Context, s SSOState) error
 	// Get returns ErrNotFound for unknown or expired states.
 	Get(ctx context.Context, idHash []byte, now time.Time) (SSOState, error)

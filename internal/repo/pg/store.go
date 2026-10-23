@@ -94,7 +94,7 @@ func mapErr(err error) error {
 	if errors.As(err, &pe) {
 		switch pe.Code {
 		case pgUniqueViolation:
-			return fmt.Errorf("%w: %w", repo.ErrConflict, err)
+			return fmt.Errorf("%w: %w", conflictFor(pe.ConstraintName), err)
 		case pgFKViolation:
 			// An insert pointing at a row that does not exist.
 			return fmt.Errorf("%w: %w", repo.ErrNotFound, err)
@@ -103,6 +103,21 @@ func mapErr(err error) error {
 		}
 	}
 	return err
+}
+
+// conflictFor names the conflicts callers react to differently. Postgres
+// default constraint names are used, so renaming one in a migration means
+// updating this.
+func conflictFor(constraint string) error {
+	switch constraint {
+	case "users_username_key":
+		return repo.ErrUsernameTaken
+	case "users_email_key":
+		return repo.ErrEmailTaken
+	case "user_identities_provider_subject_key":
+		return repo.ErrIdentityLinked
+	}
+	return repo.ErrConflict
 }
 
 // mapDeleteErr is mapErr for DELETEs, where a foreign key violation means

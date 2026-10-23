@@ -11,7 +11,6 @@ import {
   useCreateUser,
   useDeleteUser,
   useMe,
-  useSetup,
   useUpdateUser,
 } from '@/lib/queries'
 import type { User } from '@/lib/types'
@@ -56,6 +55,7 @@ import {
   PageHeader,
 } from '@/components/common'
 import { QuotaInput } from '@/components/quota-input'
+import { useProviderName } from '@/components/sso'
 
 const createSchema = z.object({
   username: z
@@ -234,9 +234,8 @@ function EditUserSheet({
 }
 
 function ProviderList({ user }: { user: User }) {
-  const { data: setup } = useSetup()
   const unlink = useAdminUnlinkIdentity()
-  const name = (id: string) => setup?.providers.find((p) => p.id === id)?.displayName ?? id
+  const name = useProviderName()
   return (
     <div className="grid gap-2">
       <p className="text-sm font-medium">Single sign-on</p>
@@ -418,9 +417,7 @@ export default function UsersPage() {
     return () => clearTimeout(t)
   }, [q])
   const users = useAdminUsers(debounced)
-  const setup = useSetup()
-  const providerName = (id: string) =>
-    setup.data?.providers.find((p) => p.id === id)?.displayName ?? id
+  const providerName = useProviderName()
   const del = useDeleteUser()
   const [creating, setCreating] = useState(false)
   const [editing, setEditing] = useState<User | null>(null)

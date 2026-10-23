@@ -18,14 +18,15 @@ import (
 
 	"github.com/crewjam/saml"
 	"github.com/crewjam/saml/samlsp"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/robertjndw/gotero/internal/config"
 )
 
 const (
-	// maxACSBody caps the SAMLResponse form. Real responses with encrypted
+	// MaxACSBody caps the SAMLResponse form. Real responses with encrypted
 	// assertions are a few KiB.
-	maxACSBody = 1 << 20
+	MaxACSBody = 1 << 20
 	// metadataTTL is how long fetched IdP metadata is trusted before a
 	// refetch, so IdP certificate rollovers get picked up.
 	metadataTTL = 24 * time.Hour
@@ -70,9 +71,12 @@ type samlProvider struct {
 	client *http.Client
 	log    *slog.Logger
 
+	// mu guards md and fetchedAt only; fetches run outside it, shared by
+	// concurrent callers.
 	mu        sync.Mutex
 	md        *saml.EntityDescriptor
 	fetchedAt time.Time
+	fetch     singleflight.Group
 }
 
 func newSAML(publicURL string, c config.SAMLProvider, kp *spKeyPair, log *slog.Logger) (*samlProvider, error) {
@@ -144,28 +148,39 @@ func (p *samlProvider) LinkByEmail() bool   { return p.cfg.LinkByEmail }
 // metadataTTL. A failed refresh keeps serving the stale copy; a failed first
 // fetch is retried on the next call.
 func (p *samlProvider) idpMetadata(ctx context.Context) (*saml.EntityDescriptor, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	if p.cfg.IDPMetadataFile != "" {
 		return p.md, nil
 	}
-	if p.md != nil && time.Since(p.fetchedAt) < metadataTTL {
-		return p.md, nil
+	p.mu.Lock()
+	cached, fresh := p.md, time.Since(p.fetchedAt) < metadataTTL
+	p.mu.Unlock()
+	if cached != nil && fresh {
+		return cached, nil
 	}
-	u, err := url.Parse(p.cfg.IDPMetadataURL)
+	v, err, _ := p.fetch.Do("", func() (any, error) {
+		u, err := url.Parse(p.cfg.IDPMetadataURL)
+		if err != nil {
+			return nil, err
+		}
+		// Detached so one canceled request does not fail the others sharing
+		// this fetch; the client timeout still bounds it.
+		md, err := samlsp.FetchMetadata(context.WithoutCancel(ctx), p.client, *u)
+		if err != nil {
+			return nil, err
+		}
+		p.mu.Lock()
+		p.md, p.fetchedAt = md, time.Now()
+		p.mu.Unlock()
+		return md, nil
+	})
 	if err != nil {
-		return nil, err
-	}
-	md, err := samlsp.FetchMetadata(ctx, p.client, *u)
-	if err != nil {
-		if p.md != nil {
+		if cached != nil {
 			p.log.Warn("saml idp metadata refresh failed, using cached copy", "provider", p.cfg.Name, "err", err)
-			return p.md, nil
+			return cached, nil
 		}
 		return nil, fmt.Errorf("saml %s: fetch idp metadata: %w", p.cfg.Name, err)
 	}
-	p.md, p.fetchedAt = md, time.Now()
-	return md, nil
+	return v.(*saml.EntityDescriptor), nil
 }
 
 // serviceProvider returns a copy so a metadata refresh never mutates a
@@ -201,7 +216,7 @@ func (p *samlProvider) ParseResponse(r *http.Request, requestID string) (Identit
 		return Identity{}, errors.New("saml: no request id")
 	}
 	if r.PostForm == nil {
-		r.Body = http.MaxBytesReader(nil, r.Body, maxACSBody)
+		r.Body = http.MaxBytesReader(nil, r.Body, MaxACSBody)
 		if err := r.ParseForm(); err != nil {
 			return Identity{}, fmt.Errorf("saml %s: read form: %w", p.cfg.Name, err)
 		}

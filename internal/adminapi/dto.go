@@ -60,11 +60,11 @@ type meDTO struct {
 }
 
 func (a *API) userDTO(ctx context.Context, u repo.User) (userDTO, error) {
-	idents, err := a.Store.Identities().ListByUser(ctx, u.ID)
+	ds, err := a.userDTOs(ctx, []repo.User{u})
 	if err != nil {
 		return userDTO{}, err
 	}
-	return a.userDTOWith(ctx, u, providerIDs(idents))
+	return ds[0], nil
 }
 
 // userDTOs builds DTOs for a list with one identity query instead of one

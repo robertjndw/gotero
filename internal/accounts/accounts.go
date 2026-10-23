@@ -286,16 +286,6 @@ func (s *Service) EnsureBootstrapAdmin(ctx context.Context, c config.AdminBootst
 
 // Authenticate verifies credentials with uniform timing for unknown users.
 func (s *Service) Authenticate(ctx context.Context, username, password string) (repo.User, error) {
-	u, err := s.authenticate(ctx, username, password)
-	if err != nil {
-		return repo.User{}, err
-	}
-	return u, nil
-}
-
-// authenticate also returns the user alongside ErrDisabled, so Login can
-// apply the local-login policy before telling the caller anything.
-func (s *Service) authenticate(ctx context.Context, username, password string) (repo.User, error) {
 	u, err := s.store.Users().GetByUsername(ctx, username)
 	if errors.Is(err, repo.ErrNotFound) {
 		_, _ = s.guard.Verify(ctx, "", password)
@@ -305,11 +295,13 @@ func (s *Service) authenticate(ctx context.Context, username, password string) (
 		return repo.User{}, err
 	}
 	ok, err := s.guard.Verify(ctx, u.PasswordHash, password)
-	if err != nil || !ok {
+	// The policy is checked after verifying so a correct password for an
+	// account that may not use one looks exactly like a wrong one.
+	if err != nil || !ok || !s.LocalLoginAllowed(u) {
 		return repo.User{}, ErrBadCredentials
 	}
 	if u.Disabled {
-		return u, ErrDisabled
+		return repo.User{}, ErrDisabled
 	}
 	return u, nil
 }
@@ -325,13 +317,8 @@ func (s *Service) Login(ctx context.Context, username, password, ip string) (rep
 	if wait, ok := s.guard.Attempt(name, ip); !ok {
 		return repo.User{}, &RateLimitedError{RetryAfter: wait}
 	}
-	u, err := s.authenticate(ctx, username, password)
+	u, err := s.Authenticate(ctx, username, password)
 	if err == nil || errors.Is(err, ErrDisabled) {
-		// The password is only verified after the check above, so a correct
-		// password for an account that may not use one looks like a wrong one.
-		if !s.LocalLoginAllowed(u) {
-			return repo.User{}, ErrBadCredentials
-		}
 		s.guard.Succeeded(name, ip)
 	}
 	if err != nil {

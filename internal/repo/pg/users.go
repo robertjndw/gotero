@@ -2,7 +2,6 @@ package pg
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"time"
 
@@ -119,7 +118,7 @@ func (r userRepo) create(ctx context.Context, u repo.User, ident *repo.Identity,
 			return err
 		}
 		if tag.RowsAffected() == 0 {
-			return fmt.Errorf("invite unknown, used or expired: %w", repo.ErrConflict)
+			return repo.ErrInviteUnavailable
 		}
 		return nil
 	})

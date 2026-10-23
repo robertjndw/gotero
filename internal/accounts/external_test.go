@@ -11,10 +11,11 @@ import (
 	"github.com/robertjndw/gotero/internal/accounts"
 	"github.com/robertjndw/gotero/internal/auth"
 	"github.com/robertjndw/gotero/internal/repo"
+	"github.com/robertjndw/gotero/internal/sso"
 )
 
 func extID(sub, email string) accounts.ExternalIdentity {
-	return accounts.ExternalIdentity{Provider: "corp", Subject: sub, Email: email, EmailVerified: true}
+	return accounts.ExternalIdentity{Provider: "corp", Identity: sso.Identity{Subject: sub, Email: email, EmailVerified: true}}
 }
 
 func login(id accounts.ExternalIdentity, p accounts.ExternalPolicy) accounts.ExternalLogin {
@@ -116,11 +117,11 @@ func TestLoginExternalUsernames(t *testing.T) {
 		id   accounts.ExternalIdentity
 		want string
 	}{
-		{accounts.ExternalIdentity{Username: "Jörg Müller"}, "J-rg-M-ller"},
-		{accounts.ExternalIdentity{Username: "x", Email: "who@example.com"}, "who"},
-		{accounts.ExternalIdentity{DisplayName: "Zed Zed"}, "Zed-Zed"},
-		{accounts.ExternalIdentity{Username: "!!"}, "user"},
-		{accounts.ExternalIdentity{Username: strings.Repeat("q", 100)}, strings.Repeat("q", 54)},
+		{accounts.ExternalIdentity{Identity: sso.Identity{Username: "Jörg Müller"}}, "J-rg-M-ller"},
+		{accounts.ExternalIdentity{Identity: sso.Identity{Username: "x", Email: "who@example.com"}}, "who"},
+		{accounts.ExternalIdentity{Identity: sso.Identity{DisplayName: "Zed Zed"}}, "Zed-Zed"},
+		{accounts.ExternalIdentity{Identity: sso.Identity{Username: "!!"}}, "user"},
+		{accounts.ExternalIdentity{Identity: sso.Identity{Username: strings.Repeat("q", 100)}}, strings.Repeat("q", 54)},
 	}
 	for i, tc := range cases {
 		tc.id.Provider, tc.id.Subject = "corp", "case-"+string(rune('a'+i))
@@ -294,7 +295,7 @@ func TestLinkExternal(t *testing.T) {
 	require.NoError(t, err)
 	assert.ErrorIs(t, svc.LinkExternal(ctx(), b.ID, extID("s4", "")), accounts.ErrDisabled)
 
-	list, err := svc.Identities(ctx(), a.ID)
+	list, err := store.Identities().ListByUser(ctx(), a.ID)
 	require.NoError(t, err)
 	require.Len(t, list, 1)
 	assert.Equal(t, "s1", list[0].Subject)
@@ -319,7 +320,7 @@ func TestUnlinkIdentityGuard(t *testing.T) {
 	t.Run("other identity remains", func(t *testing.T) {
 		u, err := svc.LoginExternal(ctx(), login(extID("s3", ""), accounts.ExternalPolicy{AutoProvision: true}))
 		require.NoError(t, err)
-		other := accounts.ExternalIdentity{Provider: "okta", Subject: "o1"}
+		other := accounts.ExternalIdentity{Provider: "okta", Identity: sso.Identity{Subject: "o1"}}
 		require.NoError(t, svc.LinkExternal(ctx(), u.ID, other))
 		require.NoError(t, svc.UnlinkIdentity(ctx(), u.ID, "okta"))
 		assert.ErrorIs(t, svc.UnlinkIdentity(ctx(), u.ID, "corp"), accounts.ErrLastLoginMethod)

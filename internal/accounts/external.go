@@ -6,20 +6,18 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"iter"
 	"strings"
 
 	"github.com/robertjndw/gotero/internal/repo"
+	"github.com/robertjndw/gotero/internal/sso"
 )
 
 // ExternalIdentity is what an OIDC or SAML provider asserted about a person.
 // Subject is the provider's stable identifier; everything else is a hint.
 type ExternalIdentity struct {
-	Provider      string
-	Subject       string
-	Email         string
-	EmailVerified bool
-	Username      string
-	DisplayName   string
+	Provider string
+	sso.Identity
 }
 
 // ExternalPolicy is the per-provider configuration that decides what an
@@ -59,13 +57,13 @@ func (s *Service) LoginExternal(ctx context.Context, in ExternalLogin) (repo.Use
 	}
 	// An unverified address must not end up on an account: email linking
 	// would later treat it as proof of ownership.
-	verified := id.Email != "" && id.EmailVerified
+	id.EmailVerified = id.Email != "" && id.EmailVerified
 
 	if u, ok, err := s.loginLinked(ctx, id); ok || err != nil {
 		return u, err
 	}
 
-	if in.Policy.LinkByEmail && verified {
+	if in.Policy.LinkByEmail && id.EmailVerified {
 		u, err := s.store.Users().GetByEmail(ctx, id.Email)
 		switch {
 		case err == nil:
@@ -82,13 +80,13 @@ func (s *Service) LoginExternal(ctx context.Context, in ExternalLogin) (repo.Use
 		if inv, err = s.validInviteHash(ctx, in.InviteHash); err != nil {
 			return repo.User{}, err
 		}
-		if inv.Email != "" && (!verified || !strings.EqualFold(inv.Email, id.Email)) {
+		if inv.Email != "" && (!id.EmailVerified || !strings.EqualFold(inv.Email, id.Email)) {
 			return repo.User{}, ErrInviteEmailMismatch
 		}
 	case !in.Policy.AutoProvision:
 		return repo.User{}, ErrNoAccount
 	}
-	return s.provisionExternal(ctx, id, verified, inv, in.InviteHash)
+	return s.provisionExternal(ctx, id, inv)
 }
 
 // loginLinked handles the returning user. ok is false when the identity is
@@ -123,22 +121,14 @@ func (s *Service) linkByEmail(ctx context.Context, u repo.User, id ExternalIdent
 	if u.Disabled {
 		return repo.User{}, ErrDisabled
 	}
-	existing, err := s.store.Identities().ListByUser(ctx, u.ID)
-	if err != nil {
-		return repo.User{}, err
-	}
-	for _, e := range existing {
-		// The subject changed for a provider the user is already linked to.
-		// Silently re-linking would hide that, so a person has to decide.
-		if e.Provider == id.Provider {
-			return repo.User{}, ErrLinkRequired
-		}
-	}
 	now := s.now()
-	_, err = s.store.Identities().Create(ctx, repo.Identity{
+	_, err := s.store.Identities().Create(ctx, repo.Identity{
 		UserID: u.ID, Provider: id.Provider, Subject: id.Subject, Email: id.Email, LastLoginAt: &now,
 	})
 	if errors.Is(err, repo.ErrConflict) {
+		// Usually the subject changed for a provider the user is already
+		// linked to. Silently re-linking would hide that, so a person has to
+		// decide.
 		return repo.User{}, ErrLinkRequired
 	}
 	if err != nil {
@@ -150,35 +140,31 @@ func (s *Service) linkByEmail(ctx context.Context, u repo.User, id ExternalIdent
 // provisionExternal creates the account. The username is chosen by trying
 // candidates against the insert itself, not by checking first, so two first
 // logins racing for the same name cannot both pass a pre-check.
-func (s *Service) provisionExternal(ctx context.Context, id ExternalIdentity, emailVerified bool, inv repo.Invite, inviteHash []byte) (repo.User, error) {
+func (s *Service) provisionExternal(ctx context.Context, id ExternalIdentity, inv repo.Invite) (repo.User, error) {
 	quota, err := s.DefaultQuota(ctx)
 	if err != nil {
 		return repo.User{}, err
 	}
 	u := repo.User{IsAdmin: inv.IsAdmin, QuotaBytes: quota}
-	if emailVerified {
+	if id.EmailVerified {
 		u.Email = id.Email
 	}
 	ident := repo.Identity{Provider: id.Provider, Subject: id.Subject, Email: id.Email}
 	name := deriveUsername(id)
 
-	for _, candidate := range usernameCandidates(name) {
+	for candidate := range usernameCandidates(name) {
 		u.Username = candidate
 		u.DisplayName = id.DisplayName
-		if u.DisplayName == "" || len(u.DisplayName) > maxNameLength {
+		if u.DisplayName == "" || validateName(u.DisplayName) != nil {
 			u.DisplayName = candidate
 		}
 		created, err := s.store.Users().CreateExternal(ctx, u, ident, inv.ID, s.now())
-		if err == nil {
+		switch {
+		case err == nil:
 			return created, nil
-		}
-		if !errors.Is(err, repo.ErrConflict) {
-			return repo.User{}, err
-		}
-		switch s.classifyExternalConflict(ctx, candidate, id, inviteHash) {
-		case conflictUsername:
+		case errors.Is(err, repo.ErrUsernameTaken):
 			continue
-		case conflictIdentity:
+		case errors.Is(err, repo.ErrIdentityLinked):
 			// A concurrent first login for the same identity won.
 			u, ok, err := s.loginLinked(ctx, id)
 			if err != nil {
@@ -188,39 +174,16 @@ func (s *Service) provisionExternal(ctx context.Context, id ExternalIdentity, em
 				return u, nil
 			}
 			return repo.User{}, ErrLinkRequired
-		case conflictInvite:
+		case errors.Is(err, repo.ErrInviteUnavailable):
 			return repo.User{}, ErrInvalidInvite
-		default:
+		case errors.Is(err, repo.ErrConflict):
+			// The email belongs to another account.
 			return repo.User{}, ErrLinkRequired
+		default:
+			return repo.User{}, err
 		}
 	}
 	return repo.User{}, fmt.Errorf("accounts: no free username for %q", name)
-}
-
-type externalConflict int
-
-const (
-	conflictEmail externalConflict = iota
-	conflictUsername
-	conflictIdentity
-	conflictInvite
-)
-
-// classifyExternalConflict works out which unique constraint fired. The repo
-// only reports a conflict, and the right reaction differs for each.
-func (s *Service) classifyExternalConflict(ctx context.Context, username string, id ExternalIdentity, inviteHash []byte) externalConflict {
-	if inviteHash != nil {
-		if _, err := s.validInviteHash(ctx, inviteHash); err != nil {
-			return conflictInvite
-		}
-	}
-	if _, err := s.store.Identities().Get(ctx, id.Provider, id.Subject); err == nil {
-		return conflictIdentity
-	}
-	if _, err := s.store.Users().GetByUsername(ctx, username); err == nil {
-		return conflictUsername
-	}
-	return conflictEmail
 }
 
 // deriveUsername picks the first source that sanitises to a valid username.
@@ -264,17 +227,24 @@ func sanitizeUsername(src string) string {
 
 // usernameCandidates yields the name, then name-2 to name-20, then random
 // suffixes.
-func usernameCandidates(base string) []string {
-	out := []string{base}
-	for i := 2; i <= numberedUsernames; i++ {
-		out = append(out, fmt.Sprintf("%s-%d", base, i))
+func usernameCandidates(base string) iter.Seq[string] {
+	return func(yield func(string) bool) {
+		if !yield(base) {
+			return
+		}
+		for i := 2; i <= numberedUsernames; i++ {
+			if !yield(fmt.Sprintf("%s-%d", base, i)) {
+				return
+			}
+		}
+		for range randomUsernames {
+			var b [4]byte
+			_, _ = rand.Read(b[:])
+			if !yield(base + "-" + hex.EncodeToString(b[:])) {
+				return
+			}
+		}
 	}
-	for range randomUsernames {
-		var b [4]byte
-		_, _ = rand.Read(b[:])
-		out = append(out, base+"-"+hex.EncodeToString(b[:]))
-	}
-	return out
 }
 
 // LinkExternal attaches an identity to a signed-in user. It is the only path
@@ -310,11 +280,6 @@ func (s *Service) LinkExternal(ctx context.Context, userID int64, id ExternalIde
 		return ErrIdentityInUse
 	}
 	return err
-}
-
-// Identities lists the providers linked to a user.
-func (s *Service) Identities(ctx context.Context, userID int64) ([]repo.Identity, error) {
-	return s.store.Identities().ListByUser(ctx, userID)
 }
 
 // UnlinkIdentity removes a link unless that would leave the user with no way

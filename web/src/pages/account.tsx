@@ -20,6 +20,7 @@ import {
 import type { ApiKey, ApiKeyAccess, CreatedApiKey, Identity } from '@/lib/types'
 import { formatDate, relativeTime } from '@/lib/format'
 import { applyServerError } from '@/lib/forms'
+import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -172,7 +173,9 @@ function PasswordCard({ hasPassword }: { hasPassword: boolean }) {
           )
         })}
       >
-        <CardContent className={`grid gap-4 ${hasPassword ? 'sm:grid-cols-3' : 'sm:grid-cols-2'}`}>
+        <CardContent
+          className={cn('grid gap-4', hasPassword ? 'sm:grid-cols-3' : 'sm:grid-cols-2')}
+        >
           {hasPassword && (
             <Field
               label="Current password"
