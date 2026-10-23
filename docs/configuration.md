@@ -19,6 +19,9 @@ gotero is configured entirely with environment variables, all starting with `GOT
 | `GOTERO_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error`. |
 | `GOTERO_LOG_FORMAT` | `json` | `json` or `text`. |
 | `GOTERO_SHUTDOWN_TIMEOUT` | `30s` | How long to wait for running requests on shutdown. |
+| `GOTERO_DELETED_LOG_RETENTION` | `0` | How long to remember deleted objects so clients can learn about deletions. `0` keeps them forever. A duration such as `4320h` (180 days) prunes older records. **Warning:** a client that has not synced within this window gets `409` on its next sync and cannot recover; Zotero retries and fails with "library in use", and the only fix is to reset that client's local data. Leave at `0` unless the log's size is a real problem. Negative values are rejected. |
+| `GOTERO_DB_MAX_CONNS` | `20` | Size of the database connection pool. A `pool_max_conns` parameter in `GOTERO_DATABASE_URL` takes precedence. Keep it below PostgreSQL's `max_connections`. |
+| `GOTERO_DB_ACQUIRE_TIMEOUT` | `10s` | How long a request waits for a free database connection before it is turned away with `503` and a `Retry-After` header. `0` waits as long as the client does. |
 | `GOTERO_MAX_REQUEST_BYTES` | `134217728` (128 MiB) | Size limit for API request bodies after decompression. Full-text uploads are the largest. |
 | `GOTERO_MAX_UPLOAD_BYTES` | `0` (unlimited) | Size limit for a single attachment file. |
 

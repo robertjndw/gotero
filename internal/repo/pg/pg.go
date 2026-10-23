@@ -7,6 +7,7 @@ import (
 	"embed"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -16,11 +17,17 @@ import (
 //go:embed migrations/*.sql
 var migrations embed.FS
 
-// Open connects to Postgres and verifies the connection.
-func Open(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
+// Open connects to Postgres and verifies the connection. maxConns sizes the
+// pool unless the DSN already carries pool_max_conns, which wins so an
+// operator's explicit URL is never silently overridden; zero keeps pgx's
+// default.
+func Open(ctx context.Context, dsn string, maxConns int32) (*pgxpool.Pool, error) {
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("parse database url: %w", err)
+	}
+	if maxConns > 0 && !strings.Contains(dsn, "pool_max_conns") {
+		cfg.MaxConns = maxConns
 	}
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {

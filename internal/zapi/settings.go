@@ -13,11 +13,23 @@ import (
 	"github.com/robertjndw/gotero/zotero"
 )
 
+// maxSettingsPerWrite is the most settings one request may carry. Zotero
+// uploads all changed settings in one request, so it needs more room than
+// the per-object limit; 270 is what zotero.org allows.
+const maxSettingsPerWrite = 270
+
 var settingKeyRe = regexp.MustCompile(`^[A-Za-z0-9_.:\-]{1,100}$`)
 
 type setting struct {
 	Value   json.RawMessage `json:"value"`
 	Version int64           `json:"version"`
+}
+
+// settingIn is a setting as uploaded. The version stays a pointer because an
+// explicit 0 on an existing setting is a stale write, not "no version".
+type settingIn struct {
+	Value   json.RawMessage `json:"value"`
+	Version *int64          `json:"version"`
 }
 
 func (a *API) getSettings(c *gin.Context) {
@@ -60,12 +72,12 @@ func (a *API) postSettings(c *gin.Context) {
 	if !ok {
 		return
 	}
-	b, err := readObjectBody(c, maxObjectsPerWrite)
+	b, err := readObjectBody(c, maxSettingsPerWrite)
 	if err != nil {
 		a.FailErr(c, err)
 		return
 	}
-	var in map[string]setting
+	var in map[string]settingIn
 	if err := json.Unmarshal(b, &in); err != nil || in == nil {
 		Fail(c, http.StatusBadRequest, "Uploaded data must be a JSON object")
 		return
@@ -83,20 +95,20 @@ func (a *API) putSetting(c *gin.Context) {
 		a.FailErr(c, err)
 		return
 	}
-	var in setting
+	var in settingIn
 	if err := json.Unmarshal(b, &in); err != nil {
 		Fail(c, http.StatusBadRequest, "Uploaded data must be a JSON object")
 		return
 	}
-	a.writeSettings(c, l, map[string]setting{c.Param("key"): in})
+	a.writeSettings(c, l, map[string]settingIn{c.Param("key"): in})
 }
 
 // writeSettings applies a batch of settings. Unchanged values keep their
 // version and do not move the library, so clients that re-upload settings on
 // every sync stay quiet.
-func (a *API) writeSettings(c *gin.Context, l *LibraryContext, in map[string]setting) {
-	if len(in) > maxObjectsPerWrite {
-		Fail(c, http.StatusRequestEntityTooLarge, fmt.Sprintf("Too many settings (max %d)", maxObjectsPerWrite))
+func (a *API) writeSettings(c *gin.Context, l *LibraryContext, in map[string]settingIn) {
+	if len(in) > maxSettingsPerWrite {
+		Fail(c, http.StatusRequestEntityTooLarge, fmt.Sprintf("Too many settings (max %d)", maxSettingsPerWrite))
 		return
 	}
 	for k, s := range in {
@@ -136,14 +148,15 @@ func (a *API) writeSettings(c *gin.Context, l *LibraryContext, in map[string]set
 		var changed []repo.Setting
 		for k, s := range in {
 			cur, exists := byKey[k]
-			if exists && s.Version > 0 && s.Version != cur.Version {
+			same := exists && zotero.EqualJSON(cur.Value, s.Value)
+			if exists && s.Version != nil && versionConflict(cur.Version, *s.Version, same) {
 				return &httpError{
 					status: http.StatusPreconditionFailed, version: tx.Version(),
 					msg: fmt.Sprintf("Setting '%s' has been modified since specified version (expected %d, found %d)",
-						k, s.Version, cur.Version),
+						k, *s.Version, cur.Version),
 				}
 			}
-			if exists && zotero.EqualJSON(cur.Value, s.Value) {
+			if same {
 				continue
 			}
 			changed = append(changed, repo.Setting{Key: k, Value: s.Value})

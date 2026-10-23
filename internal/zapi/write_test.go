@@ -142,7 +142,11 @@ func TestPlanVersionRules(t *testing.T) {
 	}{
 		{"missing object with version is 404", `{"key":"BBBBBBB2","version":3,"itemType":"book"}`, outFailed, 404},
 		{"stale version is 412", `{"key":"AAAAAAA2","version":6,"title":"x"}`, outFailed, 412},
-		{"future version is 412", `{"key":"AAAAAAA2","version":8,"title":"x"}`, outFailed, 412},
+		{"client ahead of stored version is accepted", `{"key":"AAAAAAA2","version":8,"title":"x"}`, outUpdated, 0},
+		{"explicit version zero on existing object is 412", `{"key":"AAAAAAA2","version":0,"title":"x"}`, outFailed, 412},
+		{"version zero retry of identical content is unchanged", `{"key":"AAAAAAA2","version":0,"title":"old","itemType":"book"}`, outUnchanged, 0},
+		{"version zero with a bad field still 412", `{"key":"AAAAAAA2","version":0,"bogus":"x"}`, outFailed, 412},
+		{"stale identical content is still 412", `{"key":"AAAAAAA2","version":6,"title":"old","itemType":"book"}`, outFailed, 412},
 		{"current version updates", `{"key":"AAAAAAA2","version":7,"title":"x"}`, outUpdated, 0},
 		{"no version overwrites", `{"key":"AAAAAAA2","title":"x"}`, outUpdated, 0},
 		{"version zero creates", `{"key":"BBBBBBB2","version":0,"itemType":"book"}`, outCreated, 0},
@@ -246,11 +250,17 @@ func TestPlanItemValidation(t *testing.T) {
 		{"creators not array", `{"itemType":"book","creators":"me"}`, 400},
 		{"creator without type", `{"itemType":"book","creators":[{"name":"x"}]}`, 400},
 		{"tags not objects", `{"itemType":"book","tags":["a"]}`, 400},
-		{"empty tag", `{"itemType":"book","tags":[{"tag":""}]}`, 400},
+		{"tag without name", `{"itemType":"book","tags":[{"type":1}]}`, 400},
 		{"bad tag type", `{"itemType":"book","tags":[{"tag":"a","type":2}]}`, 400},
 		{"collections not keys", `{"itemType":"book","collections":["no"]}`, 400},
 		{"unknown collection", `{"itemType":"book","collections":["ZZZZZZZ2"]}`, 409},
 		{"relations array", `{"itemType":"book","relations":[1]}`, 400},
+		{"lastRead on a book", `{"itemType":"book","lastRead":5}`, 400},
+		{"lastRead not an integer", `{"itemType":"attachment","linkMode":"imported_file","lastRead":"5"}`, 400},
+		{"lastRead fractional", `{"itemType":"attachment","linkMode":"imported_file","lastRead":1.5}`, 400},
+		{"path on imported file", `{"itemType":"attachment","linkMode":"imported_file","path":"/a.pdf"}`, 400},
+		{"path not a string", `{"itemType":"attachment","linkMode":"linked_file","path":5}`, 400},
+		{"mtime not an integer", `{"itemType":"attachment","linkMode":"imported_file","mtime":"5"}`, 400},
 		{"bad dateAdded", `{"itemType":"book","dateAdded":"yesterday"}`, 400},
 		{"bad linkMode", `{"itemType":"attachment","linkMode":"teleport"}`, 400},
 		{"bad deleted", `{"itemType":"book","deleted":"maybe"}`, 400},
@@ -492,4 +502,118 @@ func TestPlanNullCollectionsAreNormalized(t *testing.T) {
 
 	c := dataOf(t, plan(t, newFakeLib(), opts(repo.TypeCollection, false), `{"name":"c","relations":null}`)[0])
 	assert.Equal(t, map[string]any{}, c["relations"])
+}
+
+func TestPlanAttachmentExtras(t *testing.T) {
+	f := newFakeLib()
+	group := opts(repo.TypeItem, false)
+	group.Group = true
+	const stored = `{"itemType":"attachment","linkMode":"imported_file","md5":"abc","mtime":9,"lastRead":100,"tags":[],"collections":[],"relations":{},"dateAdded":"2020-01-01T00:00:00Z","dateModified":"2020-01-01T00:00:00Z"}`
+	f.put(repo.TypeItem, "AAAAAAA2", 3, stored)
+	f.put(repo.TypeItem, "LINKEDA2", 3, `{"itemType":"attachment","linkMode":"linked_file","path":"/x","tags":[],"collections":[],"relations":{},"dateAdded":"2020-01-01T00:00:00Z","dateModified":"2020-01-01T00:00:00Z"}`)
+
+	t.Run("lastRead is stored", func(t *testing.T) {
+		o := plan(t, newFakeLib(), opts(repo.TypeItem, false), `{"itemType":"attachment","linkMode":"imported_file","lastRead":1700000000}`)[0]
+		require.Equal(t, outCreated, o.Status, "%+v", o.Fail)
+		assert.EqualValues(t, 1700000000, dataOf(t, o)["lastRead"])
+	})
+	for _, clear := range []string{"null", `""`, "false"} {
+		t.Run("lastRead "+clear+" clears it", func(t *testing.T) {
+			o := plan(t, f, opts(repo.TypeItem, false), `{"key":"AAAAAAA2","lastRead":`+clear+`}`)[0]
+			require.Equal(t, outUpdated, o.Status, "%+v", o.Fail)
+			assert.NotContains(t, dataOf(t, o), "lastRead")
+		})
+	}
+	t.Run("clearing a lastRead that was never set is unchanged", func(t *testing.T) {
+		g := newFakeLib()
+		g.put(repo.TypeItem, "BBBBBBB2", 1, `{"itemType":"attachment","linkMode":"imported_file","tags":[],"collections":[],"relations":{},"dateAdded":"2020-01-01T00:00:00Z","dateModified":"2020-01-01T00:00:00Z"}`)
+		o := plan(t, g, opts(repo.TypeItem, false), `{"key":"BBBBBBB2","lastRead":null}`)[0]
+		assert.Equal(t, outUnchanged, o.Status)
+	})
+	t.Run("lastRead is refused in group libraries", func(t *testing.T) {
+		o := plan(t, newFakeLib(), group, `{"itemType":"attachment","linkMode":"imported_file","lastRead":5}`)[0]
+		require.Equal(t, outFailed, o.Status)
+		assert.Equal(t, 400, o.Fail.Code)
+		assert.Equal(t, "lastRead can only be set in user libraries", o.Fail.Message)
+	})
+	t.Run("clearing lastRead is fine in group libraries", func(t *testing.T) {
+		o := plan(t, newFakeLib(), group, `{"itemType":"attachment","linkMode":"imported_file","lastRead":null}`)[0]
+		require.Equal(t, outCreated, o.Status, "%+v", o.Fail)
+		assert.NotContains(t, dataOf(t, o), "lastRead")
+	})
+	t.Run("path on linked_file", func(t *testing.T) {
+		o := plan(t, newFakeLib(), opts(repo.TypeItem, false), `{"itemType":"attachment","linkMode":"linked_file","path":"attachments:a.pdf"}`)[0]
+		require.Equal(t, outCreated, o.Status, "%+v", o.Fail)
+		assert.Equal(t, "attachments:a.pdf", dataOf(t, o)["path"])
+	})
+	t.Run("path update uses the stored linkMode", func(t *testing.T) {
+		o := plan(t, f, opts(repo.TypeItem, false), `{"key":"LINKEDA2","path":"/y"}`)[0]
+		require.Equal(t, outUpdated, o.Status, "%+v", o.Fail)
+		o = plan(t, f, opts(repo.TypeItem, false), `{"key":"AAAAAAA2","path":"/y"}`)[0]
+		assert.Equal(t, outFailed, o.Status)
+	})
+	t.Run("path is refused in group libraries", func(t *testing.T) {
+		o := plan(t, newFakeLib(), group, `{"itemType":"attachment","linkMode":"linked_file","path":"/a"}`)[0]
+		require.Equal(t, outFailed, o.Status)
+		assert.Equal(t, 400, o.Fail.Code)
+		assert.Equal(t, "Linked files can only be added to user libraries", o.Fail.Message)
+	})
+	for _, v := range []string{"null", `""`} {
+		t.Run("md5 and mtime "+v+" keep stored values", func(t *testing.T) {
+			body := `{"key":"AAAAAAA2","md5":` + v + `,"mtime":` + v + `}`
+			assert.Equal(t, outUnchanged, plan(t, f, opts(repo.TypeItem, false), body)[0].Status)
+
+			put := `{"key":"AAAAAAA2","itemType":"attachment","linkMode":"imported_file","lastRead":100,"md5":` + v + `,"mtime":` + v + `}`
+			o := plan(t, f, opts(repo.TypeItem, true), put)[0]
+			assert.Equal(t, outUnchanged, o.Status, "%+v", o.Fail)
+		})
+	}
+	t.Run("empty md5 and mtime stay null when never set", func(t *testing.T) {
+		for _, replace := range []bool{false, true} {
+			o := plan(t, newFakeLib(), opts(repo.TypeItem, replace), `{"itemType":"attachment","linkMode":"imported_file","md5":"","mtime":""}`)[0]
+			require.Equal(t, outCreated, o.Status, "%+v", o.Fail)
+			d := dataOf(t, o)
+			assert.Nil(t, d["md5"])
+			assert.Nil(t, d["mtime"])
+		}
+		g := newFakeLib()
+		g.put(repo.TypeItem, "BBBBBBB2", 1, `{"itemType":"attachment","linkMode":"imported_file","md5":null,"mtime":null,"tags":[],"collections":[],"relations":{},"dateAdded":"2020-01-01T00:00:00Z","dateModified":"2020-01-01T00:00:00Z"}`)
+		assert.Equal(t, outUnchanged, plan(t, g, opts(repo.TypeItem, false), `{"key":"BBBBBBB2","md5":"","mtime":""}`)[0].Status)
+	})
+	t.Run("real md5 and mtime still replace", func(t *testing.T) {
+		d := dataOf(t, plan(t, f, opts(repo.TypeItem, false), `{"key":"AAAAAAA2","md5":"def","mtime":10}`)[0])
+		assert.Equal(t, "def", d["md5"])
+		assert.EqualValues(t, 10, d["mtime"])
+	})
+}
+
+func TestPlanEmptyTags(t *testing.T) {
+	f := newFakeLib()
+	const stored = `{"itemType":"book","title":"old","tags":[{"tag":"keep"}],"collections":[],"relations":{},"dateAdded":"2020-01-01T00:00:00Z","dateModified":"2020-01-02T00:00:00Z"}`
+	f.put(repo.TypeItem, "AAAAAAA2", 2, stored)
+
+	t.Run("empty and blank tags are dropped on create", func(t *testing.T) {
+		o := plan(t, newFakeLib(), opts(repo.TypeItem, false), `{"itemType":"book","tags":[{"tag":""},{"tag":"  \t"},{"tag":"0"},{"tag":"a","type":1}]}`)[0]
+		require.Equal(t, outCreated, o.Status, "%+v", o.Fail)
+		assert.Equal(t, []repo.ItemTag{{Tag: "0"}, {Tag: "a", Type: 1}}, o.Obj.Tags)
+	})
+	t.Run("an item whose only change is an empty tag is unchanged", func(t *testing.T) {
+		o := plan(t, f, opts(repo.TypeItem, false), `{"key":"AAAAAAA2","tags":[{"tag":"keep"},{"tag":""}]}`)[0]
+		assert.Equal(t, outUnchanged, o.Status, "%+v", o.Fail)
+		o = plan(t, f, opts(repo.TypeItem, true), `{"key":"AAAAAAA2",`+stored[1:len(stored)-1]+`,"tags":[{"tag":"keep"},{"tag":" "}]}`)[0]
+		assert.Equal(t, outUnchanged, o.Status, "%+v", o.Fail)
+	})
+	t.Run("bad tag type still fails next to an empty tag", func(t *testing.T) {
+		o := plan(t, f, opts(repo.TypeItem, false), `{"key":"AAAAAAA2","tags":[{"tag":""},{"tag":"a","type":2}]}`)[0]
+		assert.Equal(t, 400, o.Fail.Code)
+	})
+}
+
+func TestPlanRelationsEmptyArray(t *testing.T) {
+	o := plan(t, newFakeLib(), opts(repo.TypeItem, false), `{"itemType":"book","relations":[]}`)[0]
+	require.Equal(t, outCreated, o.Status, "%+v", o.Fail)
+	assert.Equal(t, map[string]any{}, dataOf(t, o)["relations"])
+	o = plan(t, newFakeLib(), opts(repo.TypeCollection, false), `{"name":"c","relations":[]}`)[0]
+	require.Equal(t, outCreated, o.Status, "%+v", o.Fail)
+	assert.Equal(t, map[string]any{}, dataOf(t, o)["relations"])
 }

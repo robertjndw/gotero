@@ -1,6 +1,7 @@
 package pg_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -109,6 +111,42 @@ func TestInLibraryUnknownLibrary(t *testing.T) {
 	assert.ErrorIs(t, err, repo.ErrNotFound)
 	_, err = s.Library(ctx(), 999)
 	assert.ErrorIs(t, err, repo.ErrNotFound)
+}
+
+func TestAcquireTimeoutIsBusy(t *testing.T) {
+	_, base := newStore(t)
+	cfg := base.Config().Copy()
+	cfg.MaxConns = 1
+	pool, err := pgxpool.NewWithConfig(ctx(), cfg)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	s := pg.New(pool, pg.WithAcquireTimeout(150*time.Millisecond))
+	u := mustUser(t, s, "alice")
+
+	held, err := pool.Acquire(ctx())
+	require.NoError(t, err)
+
+	start := time.Now()
+	_, err = s.InLibrary(ctx(), u.LibraryID, func(repo.LibraryTx) error {
+		t.Error("callback must not run without a connection")
+		return nil
+	})
+	require.ErrorIs(t, err, repo.ErrBusy)
+	assert.Less(t, time.Since(start), 5*time.Second)
+
+	_, err = s.Library(ctx(), u.LibraryID)
+	require.ErrorIs(t, err, repo.ErrBusy)
+
+	// A client that gives up while waiting is not an overload.
+	cctx, cancel := context.WithCancel(ctx())
+	cancel()
+	_, err = s.InLibrary(cctx, u.LibraryID, func(repo.LibraryTx) error { return nil })
+	require.ErrorIs(t, err, context.Canceled)
+	assert.NotErrorIs(t, err, repo.ErrBusy)
+
+	held.Release()
+	_, err = s.InLibrary(ctx(), u.LibraryID, func(repo.LibraryTx) error { return nil })
+	require.NoError(t, err, "the pool recovers once the connection is back")
 }
 
 func TestInLibraryLockTimeoutIsBusy(t *testing.T) {
@@ -297,10 +335,10 @@ func TestDeleteObjectsLogsAndCascades(t *testing.T) {
 	}
 
 	r, _ := s.Library(ctx(), u.LibraryID)
-	del, err := r.Deleted(ctx(), 0)
+	del, _, err := r.Deleted(ctx(), 0)
 	require.NoError(t, err)
 	assert.Equal(t, map[repo.ObjectType][]string{repo.TypeItem: {"AAAAAAAA"}}, del)
-	del, _ = r.Deleted(ctx(), v)
+	del, _, _ = r.Deleted(ctx(), v)
 	assert.Empty(t, del, "since is exclusive")
 
 	// Deleting again just moves the log entry to the newer version.
@@ -309,7 +347,7 @@ func TestDeleteObjectsLogsAndCascades(t *testing.T) {
 		return tx.LogDeleted(ctx(), repo.TypeItem, []string{"AAAAAAAA"}, v)
 	})
 	r, _ = s.Library(ctx(), u.LibraryID)
-	del, _ = r.Deleted(ctx(), v)
+	del, _, _ = r.Deleted(ctx(), v)
 	assert.Equal(t, []string{"AAAAAAAA"}, del[repo.TypeItem])
 	assert.Greater(t, v2, v)
 }
@@ -329,7 +367,7 @@ func TestDeleteCollectionsAndSearches(t *testing.T) {
 		return nil
 	})
 	r, _ := s.Library(ctx(), u.LibraryID)
-	del, _ := r.Deleted(ctx(), 0)
+	del, _, _ := r.Deleted(ctx(), 0)
 	assert.Equal(t, []string{"COLLCOLL"}, del[repo.TypeCollection])
 	assert.Equal(t, []string{"SEARSEAR"}, del[repo.TypeSearch])
 }
@@ -344,14 +382,14 @@ func TestPutDoesNotClearDeletedLog(t *testing.T) {
 		return tx.PutObjects(ctx(), repo.TypeItem, []repo.Object{item("AAAAAAAA", 4, nil)})
 	})
 	r, _ := s.Library(ctx(), u.LibraryID)
-	del, _ := r.Deleted(ctx(), 0)
+	del, _, _ := r.Deleted(ctx(), 0)
 	assert.Equal(t, []string{"AAAAAAAA", "BBBBBBBB"}, del[repo.TypeItem])
 
 	write(t, s, u.LibraryID, func(tx repo.LibraryTx) error {
 		return tx.ClearDeleted(ctx(), repo.TypeItem, []string{"AAAAAAAA"})
 	})
 	r, _ = s.Library(ctx(), u.LibraryID)
-	del, _ = r.Deleted(ctx(), 0)
+	del, _, _ = r.Deleted(ctx(), 0)
 	assert.Equal(t, []string{"BBBBBBBB"}, del[repo.TypeItem])
 }
 
@@ -367,7 +405,7 @@ func TestDeletedGroupsByType(t *testing.T) {
 		return nil
 	})
 	r, _ := s.Library(ctx(), u.LibraryID)
-	del, err := r.Deleted(ctx(), 4)
+	del, _, err := r.Deleted(ctx(), 4)
 	require.NoError(t, err)
 	assert.Len(t, del, 5)
 	assert.Equal(t, []string{"a", "b"}, del[repo.TypeTag])
@@ -635,7 +673,7 @@ func TestSettings(t *testing.T) {
 	})
 	assert.Equal(t, []string{"tagColors"}, removed)
 	r, _ = s.Library(ctx(), u.LibraryID)
-	del, _ := r.Deleted(ctx(), 0)
+	del, _, _ := r.Deleted(ctx(), 0)
 	assert.Equal(t, []string{"tagColors"}, del[repo.TypeSetting])
 	rest, _ := r.Settings(ctx(), 0)
 	assert.Len(t, rest, 1)
@@ -801,8 +839,8 @@ func TestPruneRaisesDeleteLogFloor(t *testing.T) {
 	assert.EqualValues(t, 2, n)
 
 	r, _ := s.Library(ctx(), u.LibraryID)
-	assert.EqualValues(t, 5, r.DeleteLogFloor())
-	del, _ := r.Deleted(ctx(), 0)
+	del, floor, _ := r.Deleted(ctx(), 0)
+	assert.EqualValues(t, 5, floor)
 	assert.Equal(t, []string{"NEWNEWN1"}, del[repo.TypeItem])
 
 	// Nothing left to prune, floor stays.
@@ -810,7 +848,30 @@ func TestPruneRaisesDeleteLogFloor(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, n)
 	r, _ = s.Library(ctx(), u.LibraryID)
-	assert.EqualValues(t, 5, r.DeleteLogFloor())
+	_, floor, _ = r.Deleted(ctx(), 0)
+	assert.EqualValues(t, 5, floor)
+}
+
+// A reader opened before a prune still has to get the new floor from Deleted.
+// Otherwise the handler answers 200 with entries that are already gone.
+func TestDeletedReturnsCurrentFloorAfterPrune(t *testing.T) {
+	s, pool := newStore(t)
+	u := mustUser(t, s, "alice")
+	write(t, s, u.LibraryID, func(tx repo.LibraryTx) error {
+		return tx.LogDeleted(ctx(), repo.TypeItem, []string{"OLDOLDO1"}, 3)
+	})
+	r, err := s.Library(ctx(), u.LibraryID)
+	require.NoError(t, err)
+
+	_, err = pool.Exec(ctx(), `UPDATE deleted_log SET created_at = now() - interval '40 days'`)
+	require.NoError(t, err)
+	_, err = s.Prune(ctx(), time.Now(), 30*24*time.Hour)
+	require.NoError(t, err)
+
+	del, floor, err := r.Deleted(ctx(), 1)
+	require.NoError(t, err)
+	assert.EqualValues(t, 3, floor)
+	assert.Empty(t, del)
 }
 
 func TestPruneSkipsBusyLibrary(t *testing.T) {

@@ -50,6 +50,9 @@ jobs:
       - name: contract tests
         env:
           ZOTERO_REF: ${{ matrix.zotero_ref }}
+          # deleted.test.mjs raises the delete log floor directly; there is no API for it.
+          # Absolute, because run.sh changes into e2e/contract before the tests run.
+          GOTERO_FLOOR_SQL_CMD: docker compose -f ${{ github.workspace }}/deploy/compose.yaml exec -T postgres psql -U gotero -d gotero -c
         run: e2e/contract/run.sh
       - name: gotero logs
         if: failure()

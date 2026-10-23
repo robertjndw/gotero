@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/robertjndw/gotero/internal/httpx"
 	"github.com/robertjndw/gotero/internal/repo"
 	"github.com/robertjndw/gotero/zotero"
 )
@@ -47,8 +48,8 @@ const (
 type listParams struct {
 	format  string
 	since   int64
-	keys    []string
-	limit   int // 0 means unlimited
+	keys    []string // nil means no filter, empty matches nothing
+	limit   int      // 0 means unlimited
 	start   int
 	sort    string
 	desc    bool
@@ -222,7 +223,11 @@ func (a *API) streamVersions(c *gin.Context, l *LibraryContext, q repo.ListQuery
 	}
 	c.Status(http.StatusOK)
 
-	w := bufio.NewWriterSize(c.Writer, 64<<10)
+	// A client that stops reading must not hold the cursor (and its pool
+	// connection) open indefinitely.
+	dw := httpx.NewDeadlineWriter(c.Writer, a.writeIdle)
+	defer dw.Release()
+	w := bufio.NewWriterSize(dw, 64<<10)
 	flushed := false
 	if !asKeys {
 		_ = w.WriteByte('{')
@@ -259,7 +264,11 @@ func (a *API) streamVersions(c *gin.Context, l *LibraryContext, q repo.ListQuery
 		if w.Available() < len(buf) && w.Buffered() > 0 {
 			flushed = true
 		}
-		_, _ = w.Write(buf)
+		if _, err := w.Write(buf); err != nil {
+			// The client is gone or stalled past the deadline; leaving the
+			// loop closes the cursor.
+			return
+		}
 		written++
 	}
 	if !asKeys {

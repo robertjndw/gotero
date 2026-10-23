@@ -345,6 +345,7 @@ func TestDownloadRangeAndHeaders(t *testing.T) {
 	assert.Equal(t, "application/pdf", res.Header.Get("Content-Type"))
 	assert.Equal(t, "attachment; filename*=UTF-8''%C3%BCn%C3%AF%20code.pdf", res.Header.Get("Content-Disposition"))
 	assert.Equal(t, "no-store", res.Header.Get("Cache-Control"))
+	assert.Equal(t, "16", r.Header.Get("Zotero-File-Size"))
 }
 
 func TestDownloadTokenRules(t *testing.T) {
@@ -420,8 +421,8 @@ func TestMismatchedUploadLeavesNoBlob(t *testing.T) {
 	// The token survives, so the client can retry with the right bytes.
 	assert.Equal(t, 201, e.put(t, a.URL, bytes.NewReader(p.data), int64(len(p.data))).Status)
 	assert.Equal(t, 204, e.register(t, l, key, a.UploadKey, "If-None-Match", "*").Status)
-	// And a used key cannot be uploaded to again.
-	assert.Equal(t, 409, e.put(t, a.URL, bytes.NewReader(p.data), int64(len(p.data))).Status)
+	// A used key answers 201 again: the client may be retrying a lost reply.
+	assert.Equal(t, 201, e.put(t, a.URL, bytes.NewReader(p.data), int64(len(p.data))).Status)
 }
 
 func TestUploadTargetRejectsBadKeys(t *testing.T) {
@@ -502,7 +503,7 @@ func TestRegisterRules(t *testing.T) {
 	assert.EqualValues(t, len(p.data), e.used(t, u))
 
 	again := e.register(t, l, key, a.UploadKey, "If-None-Match", "*")
-	assert.Contains(t, []int{400, 412}, again.Status)
+	assert.Equal(t, 204, again.Status, "a repeat after a lost 204 succeeds")
 	assert.EqualValues(t, len(p.data), e.used(t, u), "no double count")
 
 	// 412 reports the attachment's version, not the library's.
@@ -512,6 +513,92 @@ func TestRegisterRules(t *testing.T) {
 	assert.Equal(t, itemVersion, r.Header.Get("Last-Modified-Version"))
 	r = e.form(t, l, key, p.form(), "If-Match", strings.Repeat("0", 32))
 	assert.Equal(t, 412, r.Status)
+}
+
+func TestRepeatedUploadAnswers201(t *testing.T) {
+	e := newEnv(t)
+	u := e.newUser(t, "alice", fullAccess)
+	l := e.userLib(t, u)
+	key := e.attachment(t, l, "d.pdf")
+	p := newPayload("d.pdf", []byte("upload twice"))
+	a := e.authorize(t, l, key, p)
+
+	assert.Equal(t, 201, e.put(t, a.URL, bytes.NewReader(p.data), int64(len(p.data))).Status)
+	assert.Equal(t, 201, e.put(t, a.URL, bytes.NewReader(p.data), int64(len(p.data))).Status, "retry after a lost 201")
+
+	// The body of a repeat is not read, so even a wrong one is answered.
+	assert.Equal(t, 201, e.put(t, a.URL, strings.NewReader("junk"), 4).Status)
+}
+
+func TestRepeatedRegisterIsNoOp(t *testing.T) {
+	e := newEnv(t)
+	u := e.newUser(t, "alice", fullAccess)
+	l := e.userLib(t, u)
+
+	t.Run("If-None-Match", func(t *testing.T) {
+		key := e.attachment(t, l, "n.pdf")
+		p := newPayload("n.pdf", []byte("first file"))
+		a := e.authorize(t, l, key, p)
+		require.Equal(t, 201, e.put(t, a.URL, bytes.NewReader(p.data), int64(len(p.data))).Status)
+
+		first := e.register(t, l, key, a.UploadKey, "If-None-Match", "*")
+		require.Equal(t, 204, first.Status)
+		itemVersion := l.dataOf("items", key)["version"]
+		events := len(e.Pub.all())
+
+		again := e.register(t, l, key, a.UploadKey, "If-None-Match", "*")
+		assert.Equal(t, 204, again.Status)
+		assert.Equal(t, first.Header.Get("Last-Modified-Version"), again.Header.Get("Last-Modified-Version"))
+		assert.Equal(t, itemVersion, l.dataOf("items", key)["version"], "no item bump")
+		assert.Len(t, e.Pub.all(), events, "no event for a repeat")
+		assert.EqualValues(t, len(p.data), e.used(t, u))
+	})
+
+	t.Run("If-Match", func(t *testing.T) {
+		key := e.attachment(t, l, "m.pdf")
+		old := newPayload("m.pdf", []byte("old contents"))
+		e.store(t, l, key, old)
+
+		next := newPayload("m.pdf", []byte("replacement contents"))
+		a := e.authorize2(t, l, key, next, "If-Match", old.md5)
+		require.Equal(t, 201, e.put(t, a.URL, bytes.NewReader(next.data), int64(len(next.data))).Status)
+
+		first := e.register(t, l, key, a.UploadKey, "If-Match", old.md5)
+		require.Equal(t, 204, first.Status)
+		itemVersion := l.dataOf("items", key)["version"]
+
+		again := e.register(t, l, key, a.UploadKey, "If-Match", old.md5)
+		assert.Equal(t, 204, again.Status)
+		assert.Equal(t, first.Header.Get("Last-Modified-Version"), again.Header.Get("Last-Modified-Version"))
+		assert.Equal(t, itemVersion, l.dataOf("items", key)["version"])
+	})
+
+	t.Run("a different token is still refused", func(t *testing.T) {
+		key := e.attachment(t, l, "x.pdf")
+		e.store(t, l, key, newPayload("x.pdf", []byte("stored file")))
+		other := newPayload("x.pdf", []byte("another file"))
+		a := e.authorize2(t, l, key, other, "If-Match", newPayload("x.pdf", []byte("stored file")).md5)
+		require.Equal(t, 201, e.put(t, a.URL, bytes.NewReader(other.data), int64(len(other.data))).Status)
+		// If-None-Match: * fails the precondition because a file exists.
+		assert.Equal(t, 412, e.register(t, l, key, a.UploadKey, "If-None-Match", "*").Status)
+	})
+}
+
+func TestUploadAfterRegisterKeepsTokenRegistered(t *testing.T) {
+	e := newEnv(t)
+	u := e.newUser(t, "alice", fullAccess)
+	l := e.userLib(t, u)
+	key := e.attachment(t, l, "l.pdf")
+	p := newPayload("l.pdf", []byte("late duplicate"))
+	a := e.authorize(t, l, key, p)
+	require.Equal(t, 201, e.put(t, a.URL, bytes.NewReader(p.data), int64(len(p.data))).Status)
+	require.Equal(t, 204, e.register(t, l, key, a.UploadKey, "If-None-Match", "*").Status)
+
+	assert.Equal(t, 201, e.put(t, a.URL, bytes.NewReader(p.data), int64(len(p.data))).Status)
+	tok, err := e.Store.Files().GetUploadToken(ctx(), a.UploadKey)
+	require.NoError(t, err)
+	assert.Equal(t, "registered", tok.State)
+	assert.Equal(t, 204, e.register(t, l, key, a.UploadKey, "If-None-Match", "*").Status)
 }
 
 func TestFormValidation(t *testing.T) {

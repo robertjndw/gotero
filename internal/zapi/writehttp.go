@@ -99,7 +99,7 @@ func writeToken(c *gin.Context) (string, error) {
 func (a *API) planOptions(l *LibraryContext, t repo.ObjectType, replace bool) planOpts {
 	return planOpts{
 		Kind: t, Schema: a.schema, Now: a.now(), Replace: replace, NewKey: zotero.NewKey,
-		DenyNotes: !l.Access.Notes,
+		DenyNotes: !l.Access.Notes, Group: l.Type == "group",
 	}
 }
 
@@ -342,7 +342,10 @@ func (a *API) deleteObjects(t repo.ObjectType) gin.HandlerFunc {
 		case err != nil:
 			Fail(c, http.StatusBadRequest, "Invalid "+param)
 			return
-		case len(keys) == 0:
+		case keys == nil:
+			// Only a missing list is an error. A list of nothing but
+			// malformed keys runs the normal path, which checks the
+			// precondition and leaves the version alone.
 			Fail(c, http.StatusBadRequest, param+" not provided")
 			return
 		}

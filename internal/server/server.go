@@ -30,6 +30,10 @@ import (
 	"github.com/robertjndw/gotero/zotero/schema"
 )
 
+// uploadIdleTimeout is how long an upload body, or a streamed listing's
+// response, may stall before the connection is cut.
+const uploadIdleTimeout = time.Minute
+
 type Server struct {
 	cfg     *config.Config
 	log     *slog.Logger
@@ -51,14 +55,14 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, pool *pgxpoo
 		return nil, err
 	}
 
-	store := pg.New(pool)
+	store := pg.New(pool, pg.WithAcquireTimeout(cfg.DBAcquireTimeout))
 	authn := auth.NewAuthenticator(store.Keys(), store.Users())
 	acct := accounts.New(store, authn, cfg, log)
 	if err := acct.EnsureBootstrapAdmin(ctx, cfg.Admin); err != nil {
 		return nil, err
 	}
 	fileSvc := files.NewService(backend, store.Files(), cfg.Secret)
-	runner := jobs.New(store, fileSvc, log)
+	runner := jobs.New(store, fileSvc, log, cfg.DeletedLogRetention)
 	hub := stream.NewHub(topicResolver{auth: authn, groups: store.Groups()}, log)
 
 	imports := importer.New(importer.Deps{
@@ -94,7 +98,8 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, pool *pgxpoo
 		Notifier:        hub,
 		// Shares the web UI's login guard, so both password paths draw from
 		// one attempt budget.
-		Login: acct.Login,
+		Login:            acct.Login,
+		WriteIdleTimeout: uploadIdleTimeout,
 	})
 	api.Register(engine.Group("/api"))
 	// Upload and download targets authenticate with their own tokens, not
@@ -123,7 +128,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, pool *pgxpoo
 		httpx.ResolvePublicURL(cfg.PublicURL, trusted),
 		// Two minutes covers a 128 MiB full-text upload on a slow link;
 		// attachment uploads only need to keep moving.
-		httpx.BodyDeadlines(2*time.Minute, time.Minute),
+		httpx.BodyDeadlines(2*time.Minute, uploadIdleTimeout),
 	)
 	s.http = &http.Server{
 		Addr:    cfg.Listen,

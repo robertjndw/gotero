@@ -302,5 +302,83 @@ for (const ref of await pinnedRefs()) {
         assert.deepEqual(r.deleted, { collections: [], searches: [], items: [], tags: [], settings: [] });
       });
     });
+
+    // Fields and shapes that current desktop builds really send. The server has
+    // to accept them, or the client marks the object failed on every sync.
+    describe('payloads sent by newer clients', () => {
+      const fetchData = async (key) => {
+        const [p] = c.api.downloadObjects(T, ID, 'item', [key]);
+        return plain((await p).json[0]);
+      };
+      const attachment = (extra) => ({
+        key: objectKey(),
+        version: 0,
+        itemType: 'attachment',
+        title: 'a.pdf',
+        tags: [],
+        collections: [],
+        relations: {},
+        ...extra,
+      });
+
+      it('accepts an integer lastRead on an attachment in a user library', async () => {
+        const lastRead = 1_700_000_000;
+        const att = attachment({ linkMode: 'imported_file', contentType: 'application/pdf', filename: 'a.pdf', lastRead });
+        const r = await post('item', [att]);
+        assert.deepEqual(r.results.failed, {});
+        assert.deepEqual(r.results.success, { 0: att.key });
+        assert.equal((await fetchData(att.key)).data.lastRead, lastRead);
+      });
+
+      it('accepts a path on a linked_file attachment', async () => {
+        const att = attachment({ linkMode: 'linked_file', contentType: 'application/pdf', path: '/Users/me/Papers/a.pdf' });
+        const r = await post('item', [att]);
+        assert.deepEqual(r.results.failed, {});
+        assert.deepEqual(r.results.success, { 0: att.key });
+        assert.equal((await fetchData(att.key)).data.path, att.path);
+      });
+
+      it('drops an empty-string tag instead of failing the item', async () => {
+        const n = noteItem({ tags: [{ tag: 'kept' }, { tag: '' }] });
+        const r = await post('item', [n]);
+        assert.deepEqual(r.results.failed, {});
+        assert.deepEqual(r.results.success, { 0: n.key });
+        assert.deepEqual((await fetchData(n.key)).data.tags, [{ tag: 'kept' }]);
+      });
+
+      it('accepts relations as an empty array', async () => {
+        const n = noteItem({ relations: [] });
+        const r = await post('item', [n]);
+        assert.deepEqual(r.results.failed, {});
+        assert.deepEqual(r.results.success, { 0: n.key });
+      });
+
+      // The API client does not throw on this: the 412 comes back inside
+      // results.failed. The sync engine then raises ZoteroObjectUploadError(412),
+      // which it answers with one full library re-sync, not a per-object
+      // conflict prompt.
+      it('answers version 0 for an existing object with a per-object 412 in failed', async () => {
+        const n = noteItem();
+        const created = await post('item', [n]);
+        assert.deepEqual(created.results.failed, {});
+        const before = libVersion;
+        const r = await post('item', [{ ...n, version: 0, note: '<p>changed</p>' }]);
+        assert.equal(r.results.failed[0]?.code, 412);
+        assert.equal(r.results.failed[0]?.key, n.key);
+        assert.equal(typeof r.results.failed[0]?.message, 'string');
+        assert.deepEqual(r.results.success, {});
+        assert.equal(libVersion, before, 'a rejected write must not move the library version');
+      });
+
+      it('accepts an object version ahead of the stored one', async () => {
+        const n = noteItem();
+        const created = await post('item', [n]);
+        const stored = created.results.successful[0].version;
+        const r = await post('item', [{ ...n, version: stored + 5, note: '<p>ahead</p>' }]);
+        assert.deepEqual(r.results.failed, {});
+        assert.deepEqual(r.results.success, { 0: n.key });
+        assert.equal((await fetchData(n.key)).data.note, '<p>ahead</p>');
+      });
+    });
   });
 }

@@ -91,6 +91,22 @@ for (const ref of await pinnedRefs()) {
       );
     });
 
+    // The desktop's full-text upload step reads `.key` from every entry of both
+    // `successful` and `unchanged` to mark items as synced. A bare key string
+    // there yields undefined, so the item would never be marked synced and
+    // would be re-uploaded on every sync.
+    it('reports resent identical content in unchanged as objects carrying a key', async () => {
+      const body = { key, content: 'steady content', indexedChars: 14, totalChars: 14 };
+      const first = plain(await c.api.setFullTextForItems('user', user.userID, libVersion, [body]));
+      libVersion = Number(first.libraryVersion);
+      assert.equal(first.results.successful[0].key, key, 'successful entries must carry a key');
+
+      const again = plain(await c.api.setFullTextForItems('user', user.userID, libVersion, [body]));
+      assert.equal(again.libraryVersion, String(libVersion), 'nothing changed, so the version must not move');
+      assert.equal(again.results.unchanged[0]?.key, key, 'unchanged entries must be objects with a key');
+      assert.deepEqual(again.results.failed, {});
+    });
+
     it('full text for an unknown item key reports failure per item or false on read', async () => {
       assert.equal(await c.api.getFullTextForItem('user', user.userID, 'AAAAAAAA'), false);
     });

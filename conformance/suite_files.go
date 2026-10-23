@@ -23,6 +23,7 @@ var filesTests = []testCase{
 	{"IfNoneMatchOnExistingFile412", testFilesNoneMatchExisting},
 	{"MissingPrecondition428", testFilesNoPrecondition},
 	{"WrongMD5UploadRejected", testFilesWrongMD5},
+	{"RepeatedRegisterIsNoOp", testFilesRepeatRegister},
 	{"ParamsMultipartUpload", testFilesParams},
 	{"QuotaExceeded413", testFilesQuota},
 	{"OtherUserCannotDownload", testFilesOtherUser},
@@ -137,6 +138,9 @@ func testFilesFullFlow(t *testing.T, e *env) {
 	if got := mustHeader(t, r, "Zotero-File-MD5"); got != f.md5 {
 		t.Errorf("Zotero-File-MD5 = %q", got)
 	}
+	if got := mustHeader(t, r, "Zotero-File-Size"); got != strconv.Itoa(len(f.data)) {
+		t.Errorf("Zotero-File-Size = %q, want %d", got, len(f.data))
+	}
 	if got := mustHeader(t, r, "Zotero-File-Modification-Time"); got != strconv.FormatInt(f.mtime, 10) {
 		t.Errorf("Zotero-File-Modification-Time = %q, want %d", got, f.mtime)
 	}
@@ -231,6 +235,28 @@ func testFilesWrongMD5(t *testing.T, e *env) {
 	}
 	if got := at[obj](t, l.item(t, key), "data")["md5"]; got != nil {
 		t.Errorf("item md5 = %v after failed upload", got)
+	}
+}
+
+// A client that never saw the 204 sends the register call again and expects
+// the same answer, not a precondition failure on the file it just stored.
+func testFilesRepeatRegister(t *testing.T, e *env) {
+	l := e.userLib(t)
+	key, _ := l.newAttachment(t, "x.pdf")
+	f := newFileSpec("x.pdf", []byte("register twice "+randHex(16)))
+	a := parseAuth(t, l.authorize(t, key, f.form(), ifNone))
+	mustStatus(t, l.upload(t, a, bytes.NewReader(f.data)), 201)
+	first := l.register(t, key, a.uploadKey, ifNone)
+	mustStatus(t, first, 204)
+	itemVersion := atInt(t, at[obj](t, l.item(t, key), "data"), "version")
+
+	again := l.register(t, key, a.uploadKey, ifNone)
+	mustStatus(t, again, 204)
+	if got, want := versionHeader(t, again), versionHeader(t, first); got != want {
+		t.Errorf("repeated register Last-Modified-Version = %d, want %d", got, want)
+	}
+	if got := atInt(t, at[obj](t, l.item(t, key), "data"), "version"); got != itemVersion {
+		t.Errorf("item version moved %d -> %d on a repeated register", itemVersion, got)
 	}
 }
 

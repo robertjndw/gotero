@@ -347,7 +347,10 @@ func TestBusyLibraryIs503(t *testing.T) {
 	close(release)
 	wg.Wait()
 	assert.Equal(t, 503, r.Status, string(r.Body))
-	assert.Equal(t, "5", r.Header.Get("Retry-After"))
+	secs, err := strconv.Atoi(r.Header.Get("Retry-After"))
+	require.NoError(t, err, "Retry-After must be an integer")
+	assert.GreaterOrEqual(t, secs, 3)
+	assert.LessOrEqual(t, secs, 8)
 }
 
 func TestWriteDetails(t *testing.T) {
@@ -523,7 +526,11 @@ func TestDeleteCascades(t *testing.T) {
 	t.Run("delete validation", func(t *testing.T) {
 		v := cur()
 		assert.Equal(t, 400, l.send("DELETE", "items", nil, "If-Unmodified-Since-Version", v).Status)
-		assert.Equal(t, 400, l.send("DELETE", "items?itemKey=bad", nil, "If-Unmodified-Since-Version", v).Status)
+		// Only malformed keys: nothing to delete, and no version bump.
+		r := l.send("DELETE", "items?itemKey=bad", nil, "If-Unmodified-Since-Version", v)
+		assert.Equal(t, 204, r.Status)
+		assert.Equal(t, v, ver(r.Header))
+		assert.Equal(t, v, cur())
 		keys := make([]string, 51)
 		for i := range keys {
 			keys[i] = fmt.Sprintf("AAAAAA%02d", i+22)
@@ -616,7 +623,17 @@ func TestReads(t *testing.T) {
 	})
 	t.Run("itemKey lists and bad keys", func(t *testing.T) {
 		assert.Len(t, l.get("items?itemKey="+strings.Join(keys[:5], ",")).array(t), 5)
-		assert.Equal(t, 400, l.get("items?itemKey=bad").Status)
+		// A filter with no valid keys matches nothing; it must not fall back
+		// to listing the whole library.
+		for _, param := range []string{"items?itemKey", "collections?collectionKey", "searches?searchKey"} {
+			r := l.get(param + "=bad,!!")
+			assert.Equal(t, 200, r.Status, param)
+			assert.Equal(t, "0", r.Header.Get("Total-Results"), param)
+			assert.NotEmpty(t, r.Header.Get("Last-Modified-Version"), param)
+			assert.Empty(t, r.array(t), param)
+			assert.Equal(t, "{}", strings.TrimSpace(string(l.get(param+"=bad&format=versions").Body)), param)
+			assert.Empty(t, strings.TrimSpace(string(l.get(param+"=bad&format=keys").Body)), param)
+		}
 		many := strings.Repeat("AAAAAAA2,", 101)
 		assert.Equal(t, 400, l.get("items?itemKey="+many[:len(many)-1]).Status)
 	})
@@ -715,6 +732,20 @@ func TestSettings(t *testing.T) {
 		assert.Equal(t, 412, r.Status)
 		assert.Equal(t, "2", ver(r.Header))
 	})
+	t.Run("explicit version zero on an existing setting is 412", func(t *testing.T) {
+		r := l.post("settings", colors("#444", 0))
+		assert.Equal(t, 412, r.Status)
+		assert.Equal(t, "#222", l.get("settings/tagColors").json(t)["value"].([]any)[0].(map[string]any)["color"])
+	})
+	t.Run("version zero retry of the stored value is unchanged", func(t *testing.T) {
+		before := ver(l.get("settings").Header)
+		r := l.post("settings", colors("#222", 0))
+		assert.Equal(t, 204, r.Status, string(r.Body))
+		assert.Equal(t, before, ver(r.Header))
+	})
+	t.Run("client ahead of the setting version is accepted", func(t *testing.T) {
+		assert.Equal(t, 204, l.post("settings", colors("#555", 99)).Status)
+	})
 	t.Run("PUT single", func(t *testing.T) {
 		r := l.send("PUT", "settings/lastPageIndex_u_ABCD2345", m{"value": 7})
 		assert.Equal(t, 204, r.Status)
@@ -809,11 +840,22 @@ func TestFulltext(t *testing.T) {
 		assert.EqualValues(t, 404, f["1"].(m)["code"])
 		assert.EqualValues(t, 400, f["2"].(m)["code"])
 		assert.EqualValues(t, 400, f["3"].(m)["code"])
-		assert.Contains(t, j, "unchanged")
+		assert.Equal(t, m{}, j["unchanged"])
 		c := l.get("items/" + k + "/fulltext").json(t)
 		assert.Equal(t, "hello", c["content"])
 		assert.EqualValues(t, 5, c["indexedChars"])
 		assert.NotContains(t, c, "indexedPages")
+	})
+	t.Run("batch resend reports unchanged entries as objects", func(t *testing.T) {
+		before := l.version()
+		r := l.post("fulltext", []m{{"key": k, "content": "hello", "indexedChars": 5, "totalChars": 9}}, "If-Unmodified-Since-Version", cur())
+		require.Equal(t, 200, r.Status)
+		j := r.json(t)
+		assert.Equal(t, m{}, j["success"])
+		u := j["unchanged"].(m)["0"].(m)
+		assert.Equal(t, k, u["key"])
+		assert.NotZero(t, u["version"])
+		assert.Equal(t, before, l.version())
 	})
 	t.Run("version and deletion", func(t *testing.T) {
 		before := l.version()

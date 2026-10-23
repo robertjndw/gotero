@@ -381,6 +381,15 @@ func applyFile(ctx context.Context, tx repo.LibraryTx, at attachment, f repo.Att
 	return nil
 }
 
+// tokenItemMD5 is the md5 the item shows once the token is registered. It
+// differs from the blob md5 for zipped snapshots.
+func tokenItemMD5(tok repo.UploadToken) string {
+	if tok.ItemMD5 != "" {
+		return tok.ItemMD5
+	}
+	return tok.MD5
+}
+
 // registerFile is the last ZFS step: the bytes are committed, now the item
 // learns about them.
 func (a *API) registerFile(c *gin.Context, l *LibraryContext, key, uploadKey string) {
@@ -396,17 +405,27 @@ func (a *API) registerFile(c *gin.Context, l *LibraryContext, key, uploadKey str
 		if ferr != nil && !errors.Is(ferr, repo.ErrNotFound) {
 			return ferr
 		}
+		// Read under the library lock: of two concurrent registrations of
+		// one token, the second one sees "registered".
+		tok, terr := a.store.Files().GetUploadToken(ctx, uploadKey)
+		if terr != nil && !errors.Is(terr, repo.ErrNotFound) {
+			return terr
+		}
+		// A repeat after a lost 204 would fail the preconditions, because the
+		// first call already changed the file. If the item shows exactly what
+		// this token registered, answer as the first call did and change
+		// nothing.
+		if terr == nil && ferr == nil && tok.State == "registered" &&
+			tok.LibraryID == l.LibraryID && tok.ItemKey == key &&
+			old.MD5 == tok.MD5 && at.md5 == tokenItemMD5(tok) {
+			return nil
+		}
 		if err := checkFilePreconditions(c, at, ferr == nil); err != nil {
 			return err
 		}
-		// Read under the library lock: of two concurrent registrations of
-		// one token, the second one sees "registered".
-		tok, err := a.store.Files().GetUploadToken(ctx, uploadKey)
 		switch {
-		case errors.Is(err, repo.ErrNotFound):
+		case errors.Is(terr, repo.ErrNotFound):
 			return errStatus(http.StatusBadRequest, "Unknown upload key")
-		case err != nil:
-			return err
 		case tok.LibraryID != l.LibraryID || tok.ItemKey != key:
 			return errStatus(http.StatusBadRequest, "Upload key does not belong to this item")
 		case !tok.ExpiresAt.After(a.now()):
@@ -416,10 +435,7 @@ func (a *API) registerFile(c *gin.Context, l *LibraryContext, key, uploadKey str
 		case tok.State != "uploaded":
 			return errStatus(http.StatusBadRequest, "File has not been uploaded")
 		}
-		itemMD5 := tok.ItemMD5
-		if itemMD5 == "" {
-			itemMD5 = tok.MD5
-		}
+		itemMD5 := tokenItemMD5(tok)
 		// Parallel authorizations each passed the check against the same
 		// usage; registering is where the bytes actually get charged.
 		if err := a.checkQuota(c, l, tx, tok.Size-old.Size); err != nil {
@@ -431,7 +447,14 @@ func (a *API) registerFile(c *gin.Context, l *LibraryContext, key, uploadKey str
 		}, itemMD5, old.Size); err != nil {
 			return err
 		}
-		return a.store.Files().SetUploadTokenState(ctx, uploadKey, "registered")
+		moved, err := a.store.Files().SetUploadTokenStateFrom(ctx, uploadKey, "uploaded", "registered")
+		if err != nil {
+			return err
+		}
+		if !moved {
+			return errStatus(http.StatusBadRequest, "Upload has already been registered")
+		}
+		return nil
 	})
 	if err != nil {
 		a.FailErr(c, err)
@@ -483,6 +506,7 @@ func (a *API) getItemFile(c *gin.Context) {
 	}
 	c.Header("Location", httpx.BaseURL(ctx)+"/files/download/"+a.files.SignDownload(l.LibraryID, key, af.MD5))
 	c.Header("Zotero-File-MD5", itemMD5)
+	c.Header("Zotero-File-Size", strconv.FormatInt(af.Size, 10))
 	c.Header("Zotero-File-Modification-Time", strconv.FormatInt(af.MtimeMS, 10))
 	c.Header("Zotero-File-Compressed", compressed)
 	c.Header("Cache-Control", "no-store")

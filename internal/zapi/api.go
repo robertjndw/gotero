@@ -65,6 +65,9 @@ type Deps struct {
 	// (accounts.Service.Login) so both draw from one rate limit and one
 	// argon2 concurrency budget. Without it POST /keys refuses every login.
 	Login func(ctx context.Context, username, password, ip string) (repo.User, error)
+	// WriteIdleTimeout is how long a streamed listing may stall on a slow
+	// reader before the response is cut. Defaults to one minute.
+	WriteIdleTimeout time.Duration
 }
 
 type nopNotifier struct{}
@@ -88,6 +91,7 @@ type API struct {
 	notify       Notifier
 	login        func(ctx context.Context, username, password, ip string) (repo.User, error)
 	sessionLimit *rateLimiter
+	writeIdle    time.Duration
 }
 
 const defaultMaxRequestBytes = 32 << 20
@@ -99,6 +103,10 @@ func New(d Deps) *API {
 		log: d.Log, maxReq: d.MaxRequestBytes, now: d.Now,
 		files: d.Files, maxUpload: d.MaxUploadBytes, defQuota: d.DefaultQuota, notify: d.Notifier, login: d.Login,
 		sessionLimit: newRateLimiter(sessionsPerHour, sessionWindow),
+		writeIdle:    d.WriteIdleTimeout,
+	}
+	if a.writeIdle <= 0 {
+		a.writeIdle = time.Minute
 	}
 	if a.notify == nil {
 		a.notify = nopNotifier{}

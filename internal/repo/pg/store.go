@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -25,6 +26,7 @@ type Store struct {
 type config struct {
 	lockTimeout      time.Duration
 	statementTimeout time.Duration
+	acquireTimeout   time.Duration
 }
 
 // Option tunes a Store.
@@ -40,8 +42,13 @@ func WithStatementTimeout(d time.Duration) Option {
 	return func(c *config) { c.statementTimeout = d }
 }
 
+// WithAcquireTimeout bounds how long a library read or write waits for a pool
+// connection before failing with repo.ErrBusy. Without it a saturated pool
+// queues requests until their clients give up. Zero disables the timeout.
+func WithAcquireTimeout(d time.Duration) Option { return func(c *config) { c.acquireTimeout = d } }
+
 func New(pool *pgxpool.Pool, opts ...Option) *Store {
-	cfg := config{lockTimeout: 10 * time.Second, statementTimeout: 2 * time.Minute}
+	cfg := config{lockTimeout: 10 * time.Second, statementTimeout: 2 * time.Minute, acquireTimeout: 10 * time.Second}
 	for _, o := range opts {
 		o(&cfg)
 	}
@@ -57,6 +64,26 @@ func (s *Store) Invites() repo.InviteRepo             { return inviteRepo{s.pool
 func (s *Store) Settings() repo.InstanceSettingsRepo  { return instanceSettingsRepo{s.pool} }
 func (s *Store) Files() repo.FileRepo                 { return fileRepo{s.pool} }
 func (s *Store) Imports() repo.ImportRepo             { return importRepo{s.pool} }
+
+// acquire takes a pool connection, waiting at most the acquire timeout. Only
+// that wait maps to ErrBusy; the caller's own cancellation or deadline is
+// passed on as it is, so a client that hung up is not reported as overload.
+func (s *Store) acquire(ctx context.Context) (*pgxpool.Conn, error) {
+	actx := ctx
+	if s.cfg.acquireTimeout > 0 {
+		var cancel context.CancelFunc
+		actx, cancel = context.WithTimeout(ctx, s.cfg.acquireTimeout)
+		defer cancel()
+	}
+	conn, err := s.pool.Acquire(actx)
+	if err != nil {
+		if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+			return nil, fmt.Errorf("acquire connection: %w: %w", repo.ErrBusy, err)
+		}
+		return nil, wrap("acquire connection", err)
+	}
+	return conn, nil
+}
 
 func (s *Store) Ping(ctx context.Context) error { return s.pool.Ping(ctx) }
 
@@ -74,6 +101,18 @@ const (
 	pgFKViolation     = "23503"
 	pgLockNotAvail    = "55P03"
 )
+
+// transientCodes are SQLSTATEs where retrying later can succeed: the server
+// is overloaded, restarting or gave up on us, not the request is wrong.
+var transientCodes = map[string]bool{
+	"40001": true, // serialization_failure
+	"40P01": true, // deadlock_detected
+	"57014": true, // query_canceled, e.g. statement_timeout
+	"53300": true, // too_many_connections
+	"57P01": true, // admin_shutdown
+	"57P02": true, // crash_shutdown
+	"57P03": true, // cannot_connect_now
+}
 
 // mapErr translates driver errors into the repo sentinels and leaves every
 // other error alone. It is idempotent, so wrapped errors can pass through
@@ -99,6 +138,13 @@ func mapErr(err error) error {
 		case pgLockNotAvail:
 			return fmt.Errorf("%w: %w", repo.ErrBusy, err)
 		}
+		// Class 08 is every connection exception.
+		if transientCodes[pe.Code] || strings.HasPrefix(pe.Code, "08") {
+			return fmt.Errorf("%w: %w", repo.ErrBusy, err)
+		}
+	}
+	if pgconn.Timeout(err) {
+		return fmt.Errorf("%w: %w", repo.ErrBusy, err)
 	}
 	return err
 }
@@ -133,8 +179,8 @@ func requireRow(tag pgconn.CommandTag, err error, op string) error {
 
 func ms(d time.Duration) string { return strconv.FormatInt(d.Milliseconds(), 10) + "ms" }
 
-// Prune removes expired short-lived rows and old delete-log entries. It
-// returns the total number of rows removed.
+// Prune removes expired short-lived rows and old delete-log entries (unless
+// keepDeletedFor <= 0). It returns the total number of rows removed.
 func (s *Store) Prune(ctx context.Context, now time.Time, keepDeletedFor time.Duration) (int64, error) {
 	var total int64
 	stmts := []string{
@@ -154,6 +200,10 @@ func (s *Store) Prune(ctx context.Context, now time.Time, keepDeletedFor time.Du
 		total += tag.RowsAffected()
 	}
 
+	// Zero or less means the log is kept forever.
+	if keepDeletedFor <= 0 {
+		return total, nil
+	}
 	n, err := s.pruneDeletedLog(ctx, now.Add(-keepDeletedFor))
 	return total + n, err
 }

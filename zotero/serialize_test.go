@@ -140,6 +140,36 @@ func TestMarshalItemDataVersionFilterKeepsCore(t *testing.T) {
 	}
 }
 
+func TestMarshalItemDataLastReadFilter(t *testing.T) {
+	var m OrderedMap
+	in := `{"key":"ABCD2345","version":1,"itemType":"attachment","lastRead":5,"path":"/p","linkMode":"linked_file","filename":"f","mtime":null,"tags":[]}`
+	if err := json.Unmarshal([]byte(in), &m); err != nil {
+		t.Fatal(err)
+	}
+	old, err := MarshalItemData(m, schema.Default(), 41)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(old), "lastRead") || !strings.Contains(string(old), `"path"`) {
+		t.Errorf("schema 41 output: %s", old)
+	}
+	for _, v := range []int{0, 42} {
+		got, err := MarshalItemData(m, schema.Default(), v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(got), `"lastRead":5`) {
+			t.Errorf("schema %d output lacks lastRead: %s", v, got)
+		}
+		if strings.Index(string(got), `"linkMode"`) > strings.Index(string(got), `"filename"`) {
+			t.Errorf("linkMode must precede filename: %s", got)
+		}
+		if strings.Index(string(got), `"mtime"`) > strings.Index(string(got), `"lastRead"`) {
+			t.Errorf("lastRead should follow mtime: %s", got)
+		}
+	}
+}
+
 func TestMarshalItemDataManyKeys(t *testing.T) {
 	// More than 256 unknown keys exercises the heap-allocated seen bitset.
 	var m OrderedMap

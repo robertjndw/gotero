@@ -47,7 +47,7 @@ func setup(t *testing.T) *env {
 	}
 	return &env{
 		store: store, fs: fs, be: be, lib: u.LibraryID,
-		run: New(store, fs, slog.New(slog.NewTextHandler(io.Discard, nil))),
+		run: New(store, fs, slog.New(slog.NewTextHandler(io.Discard, nil)), 0),
 		exec: func(sql string, args ...any) {
 			if _, err := pool.Exec(context.Background(), sql, args...); err != nil {
 				t.Fatal(err)
@@ -209,5 +209,31 @@ func TestPrune(t *testing.T) {
 	e := setup(t)
 	if err := e.run.Prune(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPruneDeletedLogRetention(t *testing.T) {
+	ctx := context.Background()
+	for name, keep := range map[string]time.Duration{"forever": 0, "bounded": 24 * time.Hour} {
+		t.Run(name, func(t *testing.T) {
+			e := setup(t)
+			e.run.keepDeleted = keep
+			e.exec(`INSERT INTO deleted_log (library_id, object_type, key, version, created_at)
+				VALUES ($1, 'item', 'OLDOLDO1', 3, now() - interval '400 days')`, e.lib)
+			if err := e.run.Prune(ctx); err != nil {
+				t.Fatal(err)
+			}
+			r, err := e.store.Library(ctx, e.lib)
+			if err != nil {
+				t.Fatal(err)
+			}
+			del, _, err := r.Deleted(ctx, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := len(del[repo.TypeItem]); (keep == 0) != (got == 1) {
+				t.Fatalf("keep=%s: %d entries left", keep, got)
+			}
+		})
 	}
 }

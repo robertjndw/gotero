@@ -205,15 +205,84 @@ for (const ref of await pinnedRefs()) {
         assert.equal(file.status, 200);
       });
 
+      // Raw authorize/upload/register steps, so a test can replay one of them the way
+      // a client does after losing the response (the real client retries blindly).
+      const fileURL = (key) => `${BASE_URL}users/${user.userID}/items/${key}/file`;
+      const apiHeaders = (extra = {}) => ({
+        'Zotero-API-Key': user.key,
+        'Zotero-API-Version': '3',
+        'Content-Type': 'application/x-www-form-urlencoded',
+        ...extra,
+      });
+      async function authorize(key, content, precondition) {
+        const res = await fetch(fileURL(key), {
+          method: 'POST',
+          headers: apiHeaders(precondition),
+          body: `md5=${md5(content)}&filename=paper.pdf&filesize=${content.length}&mtime=${MTIME}`,
+        });
+        assert.equal(res.status, 200, await res.clone().text());
+        return res.json();
+      }
+      const sendBlob = (auth, content) =>
+        fetch(auth.url, {
+          method: 'POST',
+          headers: { 'Content-Type': auth.contentType },
+          body: Buffer.concat([Buffer.from(auth.prefix), content, Buffer.from(auth.suffix)]),
+        });
+      const register = (key, auth, precondition) =>
+        fetch(fileURL(key), {
+          method: 'POST',
+          headers: apiHeaders(precondition),
+          body: `upload=${auth.uploadKey}`,
+        });
+
+      it('a repeated upload POST to the same upload URL answers 201 again', async () => {
+        const item = await newAttachment(randomBytes(300));
+        const content = randomBytes(300);
+        const auth = await authorize(item.key, content, { 'If-None-Match': '*' });
+        assert.ok(auth.uploadKey, 'expected an upload authorization');
+        assert.equal((await sendBlob(auth, content)).status, 201);
+        assert.equal((await sendBlob(auth, content)).status, 201, 'a client that lost the first 201 retries the upload');
+      });
+
+      it('a repeated register after a lost 204 succeeds with If-None-Match: *', async () => {
+        const item = await newAttachment(randomBytes(300));
+        const content = randomBytes(300);
+        const auth = await authorize(item.key, content, { 'If-None-Match': '*' });
+        assert.equal((await sendBlob(auth, content)).status, 201);
+        const first = await register(item.key, auth, { 'If-None-Match': '*' });
+        assert.equal(first.status, 204);
+        const again = await register(item.key, auth, { 'If-None-Match': '*' });
+        assert.equal(again.status, 204, await again.text());
+        assert.equal(again.headers.get('last-modified-version'), first.headers.get('last-modified-version'));
+        assert.equal((await serverItem(item.key)).data.md5, md5(content));
+      });
+
+      it('a repeated register after a lost 204 succeeds with If-Match on the old hash', async () => {
+        const item = await newAttachment(randomBytes(300));
+        const v1 = randomBytes(300);
+        const a1 = await authorize(item.key, v1, { 'If-None-Match': '*' });
+        await sendBlob(a1, v1);
+        assert.equal((await register(item.key, a1, { 'If-None-Match': '*' })).status, 204);
+
+        const v2 = randomBytes(310);
+        const a2 = await authorize(item.key, v2, { 'If-Match': md5(v1) });
+        assert.ok(a2.uploadKey);
+        assert.equal((await sendBlob(a2, v2)).status, 201);
+        const first = await register(item.key, a2, { 'If-Match': md5(v1) });
+        assert.equal(first.status, 204);
+        // The stored hash is now v2's, so the original If-Match no longer matches;
+        // the retry has to be recognised as a replay of the same upload.
+        const again = await register(item.key, a2, { 'If-Match': md5(v1) });
+        assert.equal(again.status, 204, await again.text());
+        assert.equal((await serverItem(item.key)).data.md5, md5(v2));
+      });
+
       it('POST items/{key}/file without If-Match or If-None-Match is 428', async () => {
         const item = await newAttachment(randomBytes(50));
-        const res = await fetch(`${BASE_URL}users/${user.userID}/items/${item.key}/file`, {
+        const res = await fetch(fileURL(item.key), {
           method: 'POST',
-          headers: {
-            'Zotero-API-Key': user.key,
-            'Zotero-API-Version': '3',
-            'Content-Type': 'application/x-www-form-urlencoded',
-          },
+          headers: apiHeaders(),
           body: `md5=${md5('x')}&filename=a.pdf&filesize=1&mtime=${MTIME}`,
         });
         assert.equal(res.status, 428);

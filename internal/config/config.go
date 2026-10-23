@@ -25,6 +25,13 @@ type Config struct {
 
 	DatabaseURL string `env:"DATABASE_URL" envDefault:"postgres://gotero:gotero@localhost:5432/gotero?sslmode=disable"`
 
+	// DBMaxConns sizes the connection pool. A pool_max_conns parameter in
+	// DatabaseURL takes precedence.
+	DBMaxConns int32 `env:"DB_MAX_CONNS" envDefault:"20"`
+	// DBAcquireTimeout is how long a request waits for a free pool
+	// connection before it gets a 503. 0 waits as long as the client does.
+	DBAcquireTimeout time.Duration `env:"DB_ACQUIRE_TIMEOUT" envDefault:"10s"`
+
 	LogLevel  string `env:"LOG_LEVEL" envDefault:"info"`
 	LogFormat string `env:"LOG_FORMAT" envDefault:"json"`
 
@@ -41,6 +48,11 @@ type Config struct {
 	Storage Storage        `envPrefix:"STORAGE_"`
 
 	ShutdownTimeout time.Duration `env:"SHUTDOWN_TIMEOUT" envDefault:"30s"`
+
+	// DeletedLogRetention is how long delete-log entries are kept. 0 keeps
+	// them forever: Zotero clients cannot recover from the 409 that a pruned
+	// log produces, so pruning is opt-in.
+	DeletedLogRetention time.Duration `env:"DELETED_LOG_RETENTION" envDefault:"0"`
 }
 
 // AdminBootstrap creates the first admin on startup if no admin exists yet.
@@ -95,6 +107,15 @@ func (c *Config) validate() error {
 	}
 	if len(c.Secret) < 32 {
 		errs = append(errs, errors.New("GOTERO_SECRET must be at least 32 characters (generate one with `openssl rand -hex 32`)"))
+	}
+	if c.DBMaxConns < 1 {
+		errs = append(errs, fmt.Errorf("GOTERO_DB_MAX_CONNS must be at least 1, got %d", c.DBMaxConns))
+	}
+	if c.DBAcquireTimeout < 0 {
+		errs = append(errs, fmt.Errorf("GOTERO_DB_ACQUIRE_TIMEOUT must not be negative, got %s", c.DBAcquireTimeout))
+	}
+	if c.DeletedLogRetention < 0 {
+		errs = append(errs, fmt.Errorf("GOTERO_DELETED_LOG_RETENTION must not be negative, got %s", c.DeletedLogRetention))
 	}
 	for _, p := range c.TrustedProxies {
 		if _, err := netip.ParsePrefix(p); err != nil {

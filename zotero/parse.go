@@ -14,9 +14,11 @@ const MaxKeyList = 100
 // ErrTooManyKeys is returned when a key list is longer than allowed.
 var ErrTooManyKeys = errors.New("zotero: too many keys")
 
-// ParseKeyList splits a comma separated list of object keys and validates
-// each one. An empty string yields an empty list. Surrounding spaces are
-// tolerated, empty elements and malformed keys are not.
+// ParseKeyList splits a comma separated list of object keys. Surrounding
+// spaces are tolerated, and empty or malformed elements are skipped, as
+// zotero.org does. A blank string yields nil ("no filter"), while a non-blank
+// list with no valid keys yields an empty non-nil slice, which the repo layer
+// treats as "match nothing".
 func ParseKeyList(s string) ([]string, error) { return ParseKeyListMax(s, MaxKeyList) }
 
 // ParseKeyListMax is ParseKeyList with an explicit upper bound.
@@ -34,7 +36,7 @@ func ParseKeyListMax(s string, limit int) ([]string, error) {
 	for _, p := range parts {
 		p = strings.TrimSpace(p)
 		if !ValidKey(p) {
-			return nil, fmt.Errorf("zotero: invalid key %q", truncate(p, 32))
+			continue
 		}
 		out = append(out, p)
 	}

@@ -46,7 +46,8 @@ type Store interface {
 	InLibrary(ctx context.Context, libraryID int64, fn func(tx LibraryTx) error) (int64, error)
 
 	// Prune removes expired sessions, tokens and invites and delete-log
-	// entries older than keepDeletedFor. It returns the number of rows removed.
+	// entries older than keepDeletedFor; zero or less keeps the delete log
+	// forever. It returns the number of rows removed.
 	Prune(ctx context.Context, now time.Time, keepDeletedFor time.Duration) (int64, error)
 
 	// Stats returns cheap COUNT-based totals for the admin dashboard.
@@ -154,13 +155,14 @@ type AttachmentFile struct {
 type LibraryReader interface {
 	ID() int64
 	Version() int64
-	DeleteLogFloor() int64
 
 	Versions(ctx context.Context, q VersionsQuery) (iter.Seq2[KeyVersion, error], error)
 	Objects(ctx context.Context, q ListQuery) (iter.Seq2[Object, error], error)
 	Count(ctx context.Context, q ListQuery) (int64, error)
 	Get(ctx context.Context, t ObjectType, keys []string) (map[string]Object, error)
-	Deleted(ctx context.Context, since int64) (map[ObjectType][]string, error)
+	// Deleted lists keys deleted after since, plus the delete log floor read
+	// in the same statement. A since below the floor means entries were pruned.
+	Deleted(ctx context.Context, since int64) (map[ObjectType][]string, int64, error)
 	Settings(ctx context.Context, since int64) ([]Setting, error)
 	// Tags lists the distinct (tag, type) pairs on the matching items with
 	// the number of matching items carrying each.
@@ -449,7 +451,10 @@ type FileRepo interface {
 
 	CreateUploadToken(ctx context.Context, t UploadToken) error
 	GetUploadToken(ctx context.Context, uploadKey string) (UploadToken, error)
-	SetUploadTokenState(ctx context.Context, uploadKey, state string) error
+	// SetUploadTokenStateFrom moves the token from one state to another only
+	// if it is still in from, and reports whether it moved. A late duplicate
+	// request therefore cannot undo a later transition.
+	SetUploadTokenStateFrom(ctx context.Context, uploadKey, from, to string) (bool, error)
 
 	// OrphanBlobs streams blobs that no attachment references, that are older
 	// than olderThan and that no live upload token points at.

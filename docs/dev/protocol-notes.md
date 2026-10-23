@@ -26,6 +26,7 @@ gotero is a **clean-room** implementation. Don't copy code from the Zotero clien
   - A client claiming a version *ahead* of the server is accepted, but log it.
 - `Backoff: <s>` makes the client pause.
 - 429 and 503 carry an integer `Retry-After` of at least 1.
+  - gotero answers 503 with a jittered `Retry-After` of 3-8 s when a library lock or a pool connection can't be had in time, and for transient database failures (deadlock, serialization failure, statement timeout, too many connections, server shutting down, lost connection).
 - Only API version 3 is served. Any other `Zotero-API-Version` returns 400.
 
 ## Keys and IDs
@@ -46,7 +47,7 @@ gotero is a **clean-room** implementation. Don't copy code from the Zotero clien
    - `admins` and `members` must be arrays (possibly empty), or members end up syncing the library read-only.
    - Any membership change bumps the group's version.
 3. For each library (`users/{id}` or `groups/{id}`), the client **uploads first**:
-   - `POST settings` with `{"tagColors": {"value": [...], "version": N}}`, and `DELETE settings?settingKey=a,b`.
+   - `POST settings` with `{"tagColors": {"value": [...], "version": N}}`, at most 270 settings per request, and `DELETE settings?settingKey=a,b`.
    - `POST collections`, `POST searches` and `POST items`, each a JSON array of at most 50 objects (the client sends 10).
    - `DELETE {collections|searches|items}?{collectionKey|searchKey|itemKey}=K1,K2`, with at most 50 keys.
    - `DELETE tags?tag=a || b`, where the separator is ` || `. A bare `DELETE tags` returns 204.
@@ -56,13 +57,16 @@ gotero is a **clean-room** implementation. Don't copy code from the Zotero clien
      - These return `{"KEY": version}`. They are **not paginated** and have no default limit.
    - `GET {type}?{type}Key=K1,...&includeTrashed=1` with **up to 100** keys per request.
    - `GET deleted?since=V` returns `{collections:[], searches:[], items:[], tags:[], settings:[]}`.
-     - If `since` is older than the oldest delete-log entry still kept, it returns 409, which forces a full sync.
+     - If `since` is older than the oldest delete-log entry still kept, it returns 409.
+       - **The client does not recover from this.** `getDeleted` returns `false`, the engine reads that as a library version change and retries with the same `since` until it gives up with "library in use". It never falls back to a full sync. zotero.org never sends this 409.
+       - So gotero keeps the delete log forever by default (`GOTERO_DELETED_LOG_RETENTION=0`). The floor and the entries are read in one statement, so a prune can't slip between them.
    - If `Last-Modified-Version` changes partway through a download, the client starts over.
 5. Full sync uses `deleted?since=0`, `settings` without `since`, and `format=versions` without `since`.
 6. Full text:
    - `GET fulltext?since=V` returns `{itemKey: version}`.
    - `GET items/{k}/fulltext` returns `{content, indexedChars, totalChars}` or `{content, indexedPages, totalPages}`, or 404.
    - `POST fulltext` takes `[{key, content, indexedChars, totalChars, indexedPages, totalPages}]`, needs `If-Unmodified-Since-Version`, and answers in the write-response format.
+     - Unlike object writes, fulltext `unchanged` entries must be objects with a `key` (`{"0": {"key": "K"}}`). The client reads `.key` from both `successful` and `unchanged`; with bare strings it never marks the text as synced and re-uploads it every sync.
    - `PUT items/{k}/fulltext` sets a single item and returns 204.
 7. `POST users/{id}/removestoragefiles` deletes every stored file of the library and returns 204.
 
@@ -71,8 +75,11 @@ gotero is a **clean-room** implementation. Don't copy code from the Zotero clien
 - POST is a **partial patch per object**: an omitted field stays unchanged. `PUT /{type}/{key}` replaces the whole object, and `PATCH /{type}/{key}` patches it.
 - Per-object version checks:
   - A missing object with `version > 0` fails with 404.
-  - An existing object whose `version` differs from the stored one fails with 412.
-  - `version: 0` or no version means create, or overwrite if the client really means it (use the stored version).
+  - An existing object whose stored version is **newer** than the sent `version` fails with 412. That includes an explicit `version: 0`, as on zotero.org.
+    - Exception: a `version: 0` whose content already matches what's stored goes into `unchanged`. That is a create retried after its response was lost, and a 412 would cost a full resync.
+  - A sent `version` *ahead* of the stored one is accepted, like an ahead library version.
+  - No `version` at all means create, or overwrite.
+  - Settings follow the same rules, but a stale setting fails the whole request with 412.
 - One request means **one library-version bump**. Every changed object gets that new version, and `Last-Modified-Version` returns it.
 - An object whose stored content is identical after merging goes into `unchanged` and keeps its old version. If nothing changed, the library version doesn't move.
 - The response is keyed by array index (as strings):
@@ -82,7 +89,7 @@ gotero is a **clean-room** implementation. Don't copy code from the Zotero clien
    "unchanged":  {"1": "EFGH6789"},
    "failed":     {"2": {"key":"JKLM2345","code":412,"message":"Item has been modified since specified version"}}}
   ```
-  - A `failed` entry with 412 or 404 makes the client reset that library (a full sync), so only return those codes when they are actually true.
+  - A `failed` entry with 412 or 404 makes the client reset that library (one automatic full sync; a second one in the same sync throws), so only return those codes when they are actually true. A request-level 412 is milder: the client downloads, then retries.
   - 400 and 409 count as permanent errors.
 - Each write locks its library row (`SELECT ... FOR UPDATE`), so writes to one library run one after another.
 - `DELETE` records each key in the deleted log at the new version and returns 204. Deleting a missing key is not an error.
@@ -90,9 +97,15 @@ gotero is a **clean-room** implementation. Don't copy code from the Zotero clien
 - **Object JSON:**
   - Item `data` holds `key`, `version`, `itemType`, the fields, `creators`, `tags:[{tag, type?}]`, `collections:[]`, `relations:{}`, `dateAdded`, `dateModified`, and optionally `parentItem` and `deleted`.
   - Attachments add `linkMode`, `contentType`, `charset`, `filename`, `md5` and `mtime`.
+    - Zotero 9+ adds `lastRead` (integer Unix seconds; `null`, `""` or `false` clear it). It's user libraries only and is left out of responses for `Zotero-Schema-Version` below 42.
+    - `path` is only valid on `linked_file` attachments, and only in user libraries.
+    - `md5`/`mtime` sent as `null` or `""` never overwrite stored values. When nothing is stored, `""` is kept as `null`.
+  - Tags whose name is empty or only whitespace are dropped silently, not rejected. `"0"` is a valid tag.
+  - `relations: []` is accepted as `{}`.
+  - Malformed keys in `?itemKey=` (and the other key lists) are skipped. A list with no valid key matches nothing.
   - Annotations add the `annotation*` fields.
 - Store relation URIs (`http://zotero.org/users/{id}/items/{key}`) exactly as sent.
-- **Attachment field order matters.** The client fails if `filename` comes before `linkMode`. Serialize as: `key, version, parentItem, itemType, linkMode, title, accessDate, url, note, contentType, charset, filename, md5, mtime, tags, collections, relations, dateAdded, dateModified`. Order other item types by the schema's field order.
+- **Attachment field order matters.** The client fails if `filename` comes before `linkMode`. Serialize as: `key, version, parentItem, itemType, linkMode, title, accessDate, url, note, contentType, charset, filename, md5, mtime, path, lastRead, tags, collections, relations, dateAdded, dateModified`. Order other item types by the schema's field order.
 - **Schema filtering:** the client doesn't call `/schema`; it uses its bundled schema. When a client sees a field it doesn't know, it raises `ZoteroInvalidDataError`. Leave out any field newer than the request's `Zotero-Schema-Version`.
 
 ## File sync (ZFS)
@@ -105,10 +118,12 @@ gotero is a **clean-room** implementation. Don't copy code from the Zotero clien
    - With `params=1`, answer `{"url", "params": {...}, "uploadKey"}` and expect a multipart POST.
 2. **Upload:** the client POSTs `prefix + bytes + suffix` to `url` with the given `contentType`, and the server must answer **201**.
    - gotero verifies the size and md5 while streaming. For multi-file snapshots the uploaded zip is checked against `zipMD5`.
+   - A repeat POST to an upload key that already received its bytes answers 201 again (the body is drained and discarded), so a lost 201 doesn't fail the sync.
 3. **Register:** `POST items/{k}/file` with `upload=<uploadKey>` and the same If-Match/If-None-Match. Answer **204** with `Last-Modified-Version`.
    - The server writes `md5`, `mtime` and `filename` into the attachment and bumps its version, because ZFS clients don't send md5/mtime in their item uploads.
+   - A repeat register of a key that is already registered, while the item still shows that file, answers 204 again with no version bump. Without that, the retried If-Match / If-None-Match would fail with 412 because the first call already changed the file.
 4. **Download:** `GET items/{k}/file` answers **302** (never 200).
-   - Headers: `Location: <absolute self-authenticating URL>`, `Zotero-File-MD5`, `Zotero-File-Modification-Time` (ms), `Zotero-File-Compressed: Yes|No` (`Yes` for zipped snapshots), and `Cache-Control: no-store`.
+   - Headers: `Location: <absolute self-authenticating URL>`, `Zotero-File-MD5`, `Zotero-File-Size`, `Zotero-File-Modification-Time` (ms), `Zotero-File-Compressed: Yes|No` (`Yes` for zipped snapshots), and `Cache-Control: no-store`.
    - The client follows the redirect **without** the API key, so the target carries a short-lived (5 min) HMAC token bound to the md5.
    - Return 404 when no file exists.
 

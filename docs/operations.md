@@ -42,7 +42,7 @@ gotero runs these jobs by itself:
 
 | Job | When | What |
 |---|---|---|
-| Prune | every ~10 min | Removes expired logins, sessions, upload tokens and invites, plus delete records older than 180 days (clients that haven't synced for that long do a full sync) |
+| Prune | every ~10 min | Removes expired logins, sessions, upload tokens and invites, plus delete records older than `GOTERO_DELETED_LOG_RETENTION` (off by default, so delete records are kept forever; see [configuration](configuration.md)) |
 | Garbage collection | every ~6 h | Deletes files nothing references any more (after a 24 h grace period) and abandoned partial uploads |
 
 ## Performance notes
