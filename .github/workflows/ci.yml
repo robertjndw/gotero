@@ -36,7 +36,14 @@ jobs:
         if: matrix.module != '.'
         env:
           GOWORK: "off"
-        run: go build ./... && go vet ./...
+        # Our own modules are pinned at v0.0.0 until we tag them, and that
+        # only resolves through the replaces in go.work. Add them here
+        # instead of committing replaces to go.mod.
+        run: |
+          for dep in $(go mod edit -json | jq -r '.Require[]?.Path | select(startswith("github.com/robertjndw/gotero/"))'); do
+            go mod edit -replace="$dep=../${dep#github.com/robertjndw/gotero/}"
+          done
+          go build ./... && go vet ./...
 
   fuzz:
     runs-on: ubuntu-latest
