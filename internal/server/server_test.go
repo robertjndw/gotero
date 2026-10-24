@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/robertjndw/gotero/internal/config"
 	"github.com/robertjndw/gotero/internal/repo/pg/pgtest"
@@ -24,7 +25,12 @@ func newTestServer(t *testing.T) *httptest.Server {
 		Listen: ":0", LocalLogin: true, Secret: strings.Repeat("s", 32), MaxRequestBytes: 1 << 20,
 		Storage: config.Storage{Backend: "local", LocalPath: t.TempDir()},
 	}
-	s, err := New(context.Background(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), pgtest.New(t))
+	return serveApp(t, cfg, pgtest.New(t))
+}
+
+func serveApp(t *testing.T, cfg *config.Config, pool *pgxpool.Pool) *httptest.Server {
+	t.Helper()
+	s, err := New(context.Background(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), pool)
 	if err != nil {
 		t.Fatal(err)
 	}

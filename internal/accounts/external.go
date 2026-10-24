@@ -121,6 +121,11 @@ func (s *Service) linkByEmail(ctx context.Context, u repo.User, id ExternalIdent
 	if u.Disabled {
 		return repo.User{}, ErrDisabled
 	}
+	// Anyone can put any address on their own account. Linking to one
+	// nobody checked would hand that account the real owner's first login.
+	if !u.EmailVerified {
+		return repo.User{}, ErrLinkRequired
+	}
 	now := s.now()
 	_, err := s.store.Identities().Create(ctx, repo.Identity{
 		UserID: u.ID, Provider: id.Provider, Subject: id.Subject, Email: id.Email, LastLoginAt: &now,
@@ -147,7 +152,7 @@ func (s *Service) provisionExternal(ctx context.Context, id ExternalIdentity, in
 	}
 	u := repo.User{IsAdmin: inv.IsAdmin, QuotaBytes: quota}
 	if id.EmailVerified {
-		u.Email = id.Email
+		u.Email, u.EmailVerified = id.Email, true
 	}
 	ident := repo.Identity{Provider: id.Provider, Subject: id.Subject, Email: id.Email}
 	name := deriveUsername(id)
@@ -257,7 +262,7 @@ func (s *Service) LinkExternal(ctx context.Context, userID int64, id ExternalIde
 	if u.Disabled {
 		return ErrDisabled
 	}
-	if ValidateEmail(id.Email) != nil {
+	if ValidateEmail(id.Email) != nil || !id.EmailVerified {
 		id.Email = ""
 	}
 	existing, err := s.store.Identities().Get(ctx, id.Provider, id.Subject)

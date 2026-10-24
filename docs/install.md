@@ -103,12 +103,39 @@ Database migrations run on startup. Read the release notes before jumping severa
 
 ## Backups
 
-Back up both of these, ideally at the same time:
+Back up both of these, the database first:
 
 1. **The database:**
    ```sh
    docker compose -f deploy/compose.yaml exec postgres pg_dump -U gotero gotero > gotero.sql
    ```
-2. **The files:** the `gotero-files` volume for the local backend, or your bucket or WebDAV folder.
+2. **The files:** the `gotero-files` volume for the local backend, or your bucket or WebDAV folder. For the volume:
+   ```sh
+   docker run --rm -v gotero_gotero-files:/data -v "$PWD":/backup alpine tar czf /backup/files.tgz -C /data .
+   ```
 
-A file backup taken slightly later than the database backup is fine, because files are only deleted after a 24-hour grace period. Restoring a database that is *older* than what clients have already seen makes those clients refuse to sync. In that case, have them reset their sync history (**Settings → Sync → Reset**).
+Both can be taken while gotero is running, as long as the files are backed up after the database and within 24 hours of it. Files are never changed in place, and gotero deletes unused ones only after a 24-hour grace period, so such a file backup holds every file the database backup refers to. A file backup taken before the database backup can miss files uploaded in between. With S3 or WebDAV, schedule the bucket or folder backup to run after the database dump.
+
+### Restoring
+
+1. Stop gotero and bring up only the database:
+   ```sh
+   docker compose -f deploy/compose.yaml stop gotero
+   docker compose -f deploy/compose.yaml up -d --wait postgres
+   ```
+2. Replace the database with the backup:
+   ```sh
+   docker compose -f deploy/compose.yaml exec -T postgres psql -U gotero -d postgres \
+     -c 'DROP DATABASE gotero WITH (FORCE)' -c 'CREATE DATABASE gotero OWNER gotero'
+   docker compose -f deploy/compose.yaml exec -T postgres psql -q -v ON_ERROR_STOP=1 -U gotero gotero < gotero.sql
+   ```
+3. Put the files back (the image runs as user 65532):
+   ```sh
+   docker run --rm -v gotero_gotero-files:/data -v "$PWD":/backup alpine \
+     sh -c 'tar xzf /backup/files.tgz -C /data && chown -R 65532:65532 /data'
+   ```
+4. Start gotero: `docker compose -f deploy/compose.yaml up -d`.
+
+`scripts/ops-test.sh` tests these backups: it restores them into new containers after a total loss and checks that simulated Zotero clients carry on without noticing.
+
+Restoring a database that is *older* than what clients have already seen makes those clients refuse to sync. In that case, have them reset their sync history (**Settings → Sync → Reset**).

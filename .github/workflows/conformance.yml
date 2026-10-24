@@ -54,6 +54,27 @@ jobs:
           GOTERO_CONFORMANCE_ADMIN_PASS: conformance-admin-password
         run: go test -count=1 -v ./gotero -run TestConformance
 
+      # Simulated Zotero clients editing and syncing concurrently, with lost
+      # requests and responses, checked for convergence and lost writes.
+      - name: run multi-client sync simulation
+        working-directory: conformance
+        env:
+          GOTERO_CONFORMANCE_URL: http://localhost:8080/api/
+          GOTERO_CONFORMANCE_STREAM_URL: ws://localhost:8080/stream
+          GOTERO_CONFORMANCE_ADMIN_USER: admin
+          GOTERO_CONFORMANCE_ADMIN_PASS: conformance-admin-password
+          SYNCSIM_RUNS: "5"
+          SYNCSIM_ARTIFACTS: ${{ github.workspace }}/syncsim-artifacts
+        run: go test -count=1 -v ./gotero -run TestSyncSim
+
+      - name: upload simulation traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: syncsim-${{ matrix.storage }}
+          path: syncsim-artifacts
+          if-no-files-found: ignore
+
       - name: gotero logs
         if: failure()
         run: $COMPOSE logs gotero

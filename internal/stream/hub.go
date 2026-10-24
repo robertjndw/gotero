@@ -99,6 +99,47 @@ func (h *Hub) AccessChanged(userID int64) {
 	}()
 }
 
+// Revalidate re-checks every key subscription. Changes made in this
+// process call AccessChanged right away; this catches the ones it never
+// hears about, such as a key revoked or a user disabled from the CLI.
+func (h *Hub) Revalidate(ctx context.Context) {
+	var conns []*conn
+	h.each(func(c *conn) { conns = append(conns, c) })
+	// A Zotero install usually has several connections on one key, so ask
+	// the database once per key per pass, not once per connection.
+	r := &memoResolver{Resolver: h.resolver, seen: map[string]memoTopics{}}
+	for _, c := range conns {
+		for _, u := range c.users() {
+			if ctx.Err() != nil {
+				return
+			}
+			c.refreshUser(ctx, r, u)
+		}
+	}
+}
+
+type memoTopics struct {
+	userID int64
+	topics []string
+	err    error
+}
+
+// memoResolver remembers answers for one Revalidate pass. It is used from
+// one goroutine only.
+type memoResolver struct {
+	Resolver
+	seen map[string]memoTopics
+}
+
+func (m *memoResolver) KeyTopics(ctx context.Context, key string) (int64, []string, error) {
+	if t, ok := m.seen[key]; ok {
+		return t.userID, t.topics, t.err
+	}
+	id, topics, err := m.Resolver.KeyTopics(ctx, key)
+	m.seen[key] = memoTopics{id, topics, err}
+	return id, topics, err
+}
+
 func (h *Hub) each(fn func(*conn)) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -173,6 +214,18 @@ func (c *conn) hasUser(userID int64) bool {
 		}
 	}
 	return false
+}
+
+func (c *conn) users() []int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []int64
+	for _, s := range c.subs {
+		if s.apiKey != "" && !slices.Contains(out, s.userID) {
+			out = append(out, s.userID)
+		}
+	}
+	return out
 }
 
 func (c *conn) topicCount() int {

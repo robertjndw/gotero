@@ -9,7 +9,8 @@ import (
 	"testing"
 )
 
-const keyAlphabet = "23456789ABCDEFGHIJKLMNPQRSTUVWXYZ"
+// KeyAlphabet is the character set of Zotero object keys.
+const KeyAlphabet = "23456789ABCDEFGHIJKLMNPQRSTUVWXYZ"
 
 var keyRe = regexp.MustCompile(`^[23456789ABCDEFGHIJKLMNPQRSTUVWXYZ]{8}$`)
 
@@ -17,11 +18,11 @@ var keyRe = regexp.MustCompile(`^[23456789ABCDEFGHIJKLMNPQRSTUVWXYZ]{8}$`)
 func newKey() string {
 	b := make([]byte, 8)
 	for i := range b {
-		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(keyAlphabet))))
+		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(KeyAlphabet))))
 		if err != nil {
 			panic(err)
 		}
-		b[i] = keyAlphabet[n.Int64()]
+		b[i] = KeyAlphabet[n.Int64()]
 	}
 	return string(b)
 }

@@ -70,7 +70,7 @@ type entry struct {
 
 func failedOutcome(e entry, werr *writeError) outcome {
 	return outcome{Index: e.idx, Key: e.key, Status: outFailed, Fail: zotero.WriteFailure{
-		Key: e.key, Code: werr.Code, Message: werr.Msg,
+		Key: e.key, Code: werr.Code, Message: werr.Msg, Data: werr.Data,
 	}}
 }
 
@@ -171,7 +171,57 @@ func planWrite(ctx context.Context, g getter, opts planOpts, raws []json.RawMess
 		}
 		out[i] = planOne(opts, e, stored, refs)
 	}
+	failOrphans(opts.Kind, entries, out, existing, batchKeys)
 	return out, nil
+}
+
+// failOrphans fails objects whose parent is another object of the same
+// request that was not saved and does not exist either. planOne accepts any
+// key of the request as a parent, so without this a child would be stored
+// pointing at nothing when its parent fails, for example with a 404 for a
+// collection deleted elsewhere. Zotero sends parents and children in one
+// batch, and a dangling parent breaks the library for every client. The 409
+// is the one zotero.org sends for a missing parent, so Zotero uploads the
+// parent and retries. Failures can chain, hence the loop.
+//
+// inRequest holds only the entries that parsed. One that did not (a bad
+// version, say) was never looked up in existing, so its key would look
+// missing even when it is stored; planOne already checked those against
+// storage.
+func failOrphans(kind repo.ObjectType, entries []entry, out []outcome, existing map[string]repo.Object, inRequest map[string]bool) {
+	field, msg, data := "parentItem", "Parent item %s not found", "parentItem"
+	if kind == repo.TypeCollection {
+		field, msg, data = "parentCollection", "Parent collection %s not found", "collection"
+	} else if kind != repo.TypeItem {
+		return
+	}
+	saved := map[string]bool{}
+	for _, o := range out {
+		if o.Status != outFailed {
+			saved[o.Key] = true
+		}
+	}
+	for changed := true; changed; {
+		changed = false
+		for i, e := range entries {
+			if out[i].Status == outFailed {
+				continue
+			}
+			p := stringField(e.patch, field)
+			if p == "" || saved[p] {
+				continue
+			}
+			if _, ok := existing[p]; ok {
+				continue
+			}
+			if !inRequest[p] {
+				continue // a stored parent, checked by planOne
+			}
+			out[i] = failedOutcome(e, missingRef(data, p, msg))
+			delete(saved, e.key)
+			changed = true
+		}
+	}
 }
 
 // refSets are keys of objects that references in this request may point at.
@@ -457,7 +507,7 @@ func buildItem(opts planOpts, e entry, stored *repo.Object, refs refSets) (zoter
 			return base, false, badRequest("Only notes, attachments and annotations can be child items")
 		}
 		if !refs.items[parent] {
-			return base, false, conflict("Parent item %s not found", parent)
+			return base, false, missingRef("parentItem", parent, "Parent item %s not found")
 		}
 	}
 	known := map[string]bool{}
@@ -466,7 +516,7 @@ func buildItem(opts planOpts, e entry, stored *repo.Object, refs refSets) (zoter
 	}
 	for _, k := range stringList(p.patch, "collections") {
 		if !known[k] && !refs.collections[k] {
-			return base, false, conflict("Collection %s not found", k)
+			return base, false, missingRef("collection", k, "Collection %s not found")
 		}
 	}
 
@@ -575,7 +625,7 @@ func buildCollection(opts planOpts, e entry, stored *repo.Object, refs refSets) 
 		return base, false, badRequest("Collection name cannot be empty")
 	}
 	if parent := stringField(p.patch, "parentCollection"); parent != "" && !refs.collections[parent] {
-		return base, false, conflict("Parent collection %s not found", parent)
+		return base, false, missingRef("collection", parent, "Parent collection %s not found")
 	}
 	defaults := func(m *zotero.OrderedMap) {
 		m.SetDefault("parentCollection", json.RawMessage("false"))

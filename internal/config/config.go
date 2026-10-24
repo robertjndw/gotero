@@ -34,6 +34,9 @@ type Config struct {
 	// DBAcquireTimeout is how long a request waits for a free pool
 	// connection before it gets a 503. 0 waits as long as the client does.
 	DBAcquireTimeout time.Duration `env:"DB_ACQUIRE_TIMEOUT" envDefault:"10s"`
+	// DBLockTimeout is how long a write waits behind other writes to the
+	// same library before it gets a 503. 0 waits as long as the client does.
+	DBLockTimeout time.Duration `env:"DB_LOCK_TIMEOUT" envDefault:"10s"`
 
 	LogLevel  string `env:"LOG_LEVEL" envDefault:"info"`
 	LogFormat string `env:"LOG_FORMAT" envDefault:"json"`
@@ -265,6 +268,9 @@ func (c *Config) validate() error {
 	}
 	if c.DBAcquireTimeout < 0 {
 		errs = append(errs, fmt.Errorf("GOTERO_DB_ACQUIRE_TIMEOUT must not be negative, got %s", c.DBAcquireTimeout))
+	}
+	if c.DBLockTimeout < 0 {
+		errs = append(errs, fmt.Errorf("GOTERO_DB_LOCK_TIMEOUT must not be negative, got %s", c.DBLockTimeout))
 	}
 	if c.DeletedLogRetention < 0 {
 		errs = append(errs, fmt.Errorf("GOTERO_DELETED_LOG_RETENTION must not be negative, got %s", c.DeletedLogRetention))

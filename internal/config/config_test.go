@@ -21,8 +21,8 @@ func TestDefaults(t *testing.T) {
 	if c.Listen != ":8080" || c.Storage.Backend != "local" || c.OpenRegistration {
 		t.Fatalf("unexpected defaults: %+v", c)
 	}
-	if c.DBMaxConns != 20 || c.DBAcquireTimeout != 10*time.Second {
-		t.Fatalf("unexpected pool defaults: %d, %s", c.DBMaxConns, c.DBAcquireTimeout)
+	if c.DBMaxConns != 20 || c.DBAcquireTimeout != 10*time.Second || c.DBLockTimeout != 10*time.Second {
+		t.Fatalf("unexpected pool defaults: %d, %s, %s", c.DBMaxConns, c.DBAcquireTimeout, c.DBLockTimeout)
 	}
 	if c.DeletedLogRetention != 0 {
 		t.Fatalf("delete log must be kept forever by default, got %s", c.DeletedLogRetention)
@@ -49,6 +49,7 @@ func TestValidation(t *testing.T) {
 		"s3 no bucket":    {"GOTERO_SECRET": secret, "GOTERO_STORAGE_BACKEND": "s3", "GOTERO_STORAGE_S3_ENDPOINT": "minio:9000"},
 		"no connections":  {"GOTERO_SECRET": secret, "GOTERO_DB_MAX_CONNS": "0"},
 		"negative wait":   {"GOTERO_SECRET": secret, "GOTERO_DB_ACQUIRE_TIMEOUT": "-1s"},
+		"negative lock":   {"GOTERO_SECRET": secret, "GOTERO_DB_LOCK_TIMEOUT": "-1s"},
 		"negative retain": {"GOTERO_SECRET": secret, "GOTERO_DELETED_LOG_RETENTION": "-1h"},
 		"admin half":      {"GOTERO_SECRET": secret, "GOTERO_ADMIN_USERNAME": "root"},
 	}

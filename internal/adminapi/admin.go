@@ -64,7 +64,7 @@ func (a *API) adminCreateUser(c *gin.Context) error {
 	}
 	u, err := a.Accounts.CreateUser(c.Request.Context(), accounts.CreateUserInput{
 		Username: in.Username, Password: in.Password, Email: in.Email, DisplayName: in.DisplayName,
-		IsAdmin: in.IsAdmin, Quota: in.QuotaBytes.opt(),
+		IsAdmin: in.IsAdmin, Quota: in.QuotaBytes.opt(), EmailVerified: true,
 	})
 	if err != nil {
 		return err
@@ -96,7 +96,7 @@ func (a *API) adminPatchUser(c *gin.Context) error {
 	}
 	u, err := a.Accounts.UpdateUser(c.Request.Context(), id, accounts.UserPatch{
 		DisplayName: in.DisplayName, Email: in.Email, IsAdmin: in.IsAdmin, Disabled: in.Disabled,
-		Quota: in.QuotaBytes.opt(), Password: in.Password,
+		Quota: in.QuotaBytes.opt(), Password: in.Password, EmailVerified: true,
 	}, currentUser(c).ID)
 	if err != nil {
 		return err

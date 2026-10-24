@@ -144,9 +144,11 @@ func (h *Hub) create(ctx context.Context, c *conn, req []zs.Subscription, reply 
 			continue
 		}
 		if err != nil {
+			// Reporting this as a subscription error would leave the client
+			// connected but deaf: Zotero logs such errors and never retries.
+			// Closing makes it reconnect and subscribe again after its delay.
 			h.log.Warn("stream: resolve key", "err", err)
-			errs = append(errs, zs.SubscriptionError{APIKey: s.APIKey, Error: "Temporary server error"})
-			continue
+			return int(websocket.StatusTryAgainLater), "Temporary server error"
 		}
 		sub := &subscription{apiKey: s.APIKey, userID: userID}
 		if len(s.Topics) == 0 {

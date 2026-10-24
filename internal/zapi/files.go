@@ -477,7 +477,7 @@ func (a *API) getItemFile(c *gin.Context) {
 	}
 	ctx := c.Request.Context()
 	key := c.Param("key")
-	at, err := loadAttachment(ctx, l.Reader, key)
+	at, af, err := a.consistentFile(ctx, l.Reader, key)
 	if err != nil && !isStatus(err, http.StatusBadRequest) {
 		a.FailErr(c, err)
 		return
@@ -487,18 +487,12 @@ func (a *API) getItemFile(c *gin.Context) {
 		Fail(c, http.StatusNotFound, "File not found")
 		return
 	}
-	af, err := l.Reader.AttachmentFile(ctx, key)
-	if errors.Is(err, repo.ErrNotFound) {
-		Fail(c, http.StatusNotFound, "File not found")
-		return
-	}
-	if err != nil {
-		a.FailErr(c, err)
-		return
-	}
-	itemMD5 := at.md5
-	if itemMD5 == "" {
-		itemMD5 = af.MD5
+	// Plain files are served from exactly this blob, so its md5 is the one
+	// to announce. Only a zipped snapshot shows the item's md5, which is
+	// that of the file inside.
+	itemMD5 := af.MD5
+	if af.Compressed && at.md5 != "" {
+		itemMD5 = at.md5
 	}
 	compressed := "No"
 	if af.Compressed {
@@ -511,6 +505,39 @@ func (a *API) getItemFile(c *gin.Context) {
 	c.Header("Zotero-File-Compressed", compressed)
 	c.Header("Cache-Control", "no-store")
 	c.Status(http.StatusFound)
+}
+
+// consistentFile reads an attachment and its file row as of the same
+// registration. The reads are not locked, so a new upload registering
+// between them would pair the old item md5 with the new blob, and Zotero
+// rejects a download whose md5 does not match. Reading the file row before
+// and after the item and comparing catches that.
+func (a *API) consistentFile(ctx context.Context, r repo.LibraryReader, key string) (attachment, repo.AttachmentFile, error) {
+	for attempt := 0; ; attempt++ {
+		before, err := r.AttachmentFile(ctx, key)
+		if errors.Is(err, repo.ErrNotFound) {
+			if _, aerr := loadAttachment(ctx, r, key); aerr != nil {
+				return attachment{}, before, aerr
+			}
+			return attachment{}, before, errStatus(http.StatusNotFound, "File not found")
+		}
+		if err != nil {
+			return attachment{}, before, err
+		}
+		at, err := loadAttachment(ctx, r, key)
+		if err != nil {
+			return at, before, err
+		}
+		after, err := r.AttachmentFile(ctx, key)
+		switch {
+		case errors.Is(err, repo.ErrNotFound):
+			return at, after, errStatus(http.StatusNotFound, "File not found")
+		case err != nil:
+			return at, after, err
+		case after.MD5 == before.MD5 || attempt == 4:
+			return at, after, nil
+		}
+	}
 }
 
 func isStatus(err error, status int) bool {

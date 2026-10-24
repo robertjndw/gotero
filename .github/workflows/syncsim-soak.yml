@@ -1,0 +1,59 @@
+name: syncsim-soak
+
+# The multi-client simulation runs one seed per scenario in every test run.
+# Nightly it runs many more, with seeds that change daily, to find rare
+# interleavings. A failure names its seed; replay it with SYNCSIM_SEED.
+on:
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: Seeds per scenario
+        default: "50"
+  schedule:
+    - cron: "41 2 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  soak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.work
+          cache-dependency-path: "**/go.sum"
+      - name: soak
+        env:
+          SYNCSIM_RUNS: ${{ inputs.runs || '50' }}
+          SYNCSIM_BASE: ${{ github.run_number }}
+          SYNCSIM_ARTIFACTS: ${{ github.workspace }}/syncsim-artifacts
+        run: go test -race -count=1 -timeout 55m ./internal/server -run TestMultiClientSync
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: syncsim-soak
+          path: syncsim-artifacts
+          if-no-files-found: ignore
+
+  # Upgrade from the last release (or the previous commit while there are no
+  # tags), crashes mid-sync, and a backup restored after a total loss, all
+  # with the real images.
+  ops:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.work
+          cache-dependency-path: "**/go.sum"
+      - name: upgrade, crash and restore
+        env:
+          SYNCSIM_RUNS: "3"
+          SYNCSIM_BASE: ${{ github.run_number }}
+        run: scripts/ops-test.sh "$(git describe --tags --abbrev=0 2>/dev/null || git rev-parse HEAD~1)"

@@ -5,6 +5,7 @@ export type User = {
   username: string
   displayName: string
   email: string
+  emailVerified: boolean
   isAdmin: boolean
   disabled: boolean
   quotaBytes: number | null

@@ -449,6 +449,13 @@ func TestWriteDetails(t *testing.T) {
 		f := r.json(t)["failed"].(m)
 		assert.EqualValues(t, 409, f["0"].(m)["code"])
 		assert.EqualValues(t, 409, f["1"].(m)["code"])
+		// Zotero needs data to find and re-upload the missing object.
+		assert.Equal(t, m{"parentItem": "ZZZZZZZ2"}, f["0"].(m)["data"])
+		assert.Equal(t, m{"collection": "ZZZZZZZ2"}, f["1"].(m)["data"])
+		c := l.post("collections", []m{{"name": "x", "parentCollection": "ZZZZZZZ3"}}).json(t)["failed"].(m)["0"].(m)
+		assert.EqualValues(t, 409, c["code"])
+		assert.Equal(t, "Parent collection ZZZZZZZ3 not found", c["message"])
+		assert.Equal(t, m{"collection": "ZZZZZZZ3"}, c["data"])
 	})
 	t.Run("collection cycle", func(t *testing.T) {
 		r := l.post("collections", []m{{"key": "SELFAAA2", "name": "x", "parentCollection": "SELFAAA2"}})
@@ -504,6 +511,7 @@ func TestDeleteCascades(t *testing.T) {
 		keep := l.create("collections", m{"name": "keep"})
 		it := l.create("items", m{"itemType": "book", "collections": []string{top, sub, keep}})
 		untouched := l.create("items", m{"itemType": "book", "collections": []string{keep}})
+		itV := l.get("items/" + it).json(t)["version"]
 		beforeV := l.dataOf("items", untouched)["dateModified"]
 		before := l.version()
 
@@ -516,7 +524,7 @@ func TestDeleteCascades(t *testing.T) {
 		assert.Equal(t, 200, l.get("collections/"+keep).Status)
 		o := l.get("items/" + it).json(t)
 		assert.Equal(t, []any{keep}, o["data"].(m)["collections"])
-		assert.EqualValues(t, before+1, o["version"], "detached items get the new version")
+		assert.EqualValues(t, itV, o["version"], "detached items keep their version, as on zotero.org")
 		assert.EqualValues(t, before, l.get("items/" + untouched).json(t)["version"])
 		assert.Equal(t, beforeV, l.dataOf("items", untouched)["dateModified"])
 		del := string(l.get("deleted?since=0").Body)

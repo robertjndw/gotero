@@ -13,6 +13,8 @@ var writeTests = []testCase{
 	{"PartialPatchKeepsOtherFields", testWritePartial},
 	{"StaleObjectVersionFails412", testWriteStaleObject},
 	{"MissingObjectWithVersionFails404", testWriteMissing404},
+	{"MissingReferenceNamesDependency409", testWriteMissingRef},
+	{"ChildOfFailedParentInBatchFails409", testWriteOrphanInBatch},
 	{"ExplicitVersionZeroOnExistingFails412", testWriteVersionZero},
 	{"ClientAheadOfObjectVersionAccepted", testWriteClientAhead},
 	{"MalformedKeysInKeyListAreIgnored", testWriteMalformedKeyList},
@@ -136,6 +138,71 @@ func testWriteMissing404(t *testing.T, e *env) {
 	f := at[obj](t, parseObj(t, r), "failed", "0")
 	if atInt(t, f, "code") != 404 {
 		t.Errorf("failed[0] = %v, want 404", f)
+	}
+}
+
+// testWriteMissingRef checks the 409s for references to objects the server
+// does not have. Zotero reads data.collection and data.parentItem to find the
+// missing object, mark it for upload and retry; without them the object
+// fails on every sync.
+func testWriteMissingRef(t *testing.T, e *env) {
+	l := e.userLib(t)
+	ghost := newKey()
+	r := l.post(t, "items", []obj{
+		{"itemType": "note", "note": "x", "parentItem": ghost},
+		{"itemType": "book", "title": "x", "collections": []string{ghost}},
+	})
+	mustStatus(t, r, 200)
+	c := l.post(t, "collections", []obj{{"name": "x", "parentCollection": ghost}})
+	mustStatus(t, c, 200)
+	for _, tc := range []struct {
+		f     obj
+		field string
+	}{
+		{at[obj](t, parseObj(t, r), "failed", "0"), "parentItem"},
+		{at[obj](t, parseObj(t, r), "failed", "1"), "collection"},
+		{at[obj](t, parseObj(t, c), "failed", "0"), "collection"},
+	} {
+		if atInt(t, tc.f, "code") != 409 {
+			t.Errorf("failed entry %v: want code 409", tc.f)
+		}
+		data, _ := tc.f["data"].(obj)
+		if data[tc.field] != ghost {
+			t.Errorf("failed entry %v: want data.%s = %s", tc.f, tc.field, ghost)
+		}
+	}
+}
+
+// testWriteOrphanInBatch sends a parent that fails (it names a version but
+// does not exist) together with its child. The child must not be saved
+// pointing at nothing; zotero.org processes the batch in order and answers
+// 409 for the missing parent.
+func testWriteOrphanInBatch(t *testing.T, e *env) {
+	l := e.userLib(t)
+	parent, child, item, note := newKey(), newKey(), newKey(), newKey()
+	r := l.post(t, "collections", []obj{
+		{"key": parent, "version": 5, "name": "gone"},
+		{"key": child, "name": "child", "parentCollection": parent},
+	})
+	mustStatus(t, r, 200)
+	o := parseObj(t, r)
+	if atInt(t, o, "failed", "0", "code") != 404 {
+		t.Errorf("parent: want 404, got %v", o["failed"])
+	}
+	if atInt(t, o, "failed", "1", "code") != 409 {
+		t.Errorf("child of failed parent: want 409, got %v", o)
+	}
+	r = l.post(t, "items", []obj{
+		{"key": item, "version": 5, "itemType": "book", "title": "gone"},
+		{"key": note, "itemType": "note", "note": "x", "parentItem": item},
+	})
+	mustStatus(t, r, 200)
+	o = parseObj(t, r)
+	if atInt(t, o, "failed", "1", "code") != 409 {
+		t.Errorf("note of failed parent item: want 409, got %v", o)
+	}
+	if got := l.get(t, "collections/"+child); got.Status != 404 {
+		t.Errorf("orphan collection was stored: %s", got)
 	}
 }
 

@@ -61,6 +61,7 @@ gotero is a **clean-room** implementation. Don't copy code from the Zotero clien
        - **The client does not recover from this.** `getDeleted` returns `false`, the engine reads that as a library version change and retries with the same `since` until it gives up with "library in use". It never falls back to a full sync. zotero.org never sends this 409.
        - So gotero keeps the delete log forever by default (`GOTERO_DELETED_LOG_RETENTION=0`). The floor and the entries are read in one statement, so a prune can't slip between them.
    - If `Last-Modified-Version` changes partway through a download, the client starts over.
+   - Reads are not one snapshot: the header is read first, then the listing. A write committing in between can put an object newer than the header into the listing. That is safe, because the next response carries the newer version and restarts the download. Reading the header last would not be safe: it could claim a version whose deletions the listing missed.
 5. Full sync uses `deleted?since=0`, `settings` without `since`, and `format=versions` without `since`.
 6. Full text:
    - `GET fulltext?since=V` returns `{itemKey: version}`.
@@ -90,9 +91,13 @@ gotero is a **clean-room** implementation. Don't copy code from the Zotero clien
    "failed":     {"2": {"key":"JKLM2345","code":412,"message":"Item has been modified since specified version"}}}
   ```
   - A `failed` entry with 412 or 404 makes the client reset that library (one automatic full sync; a second one in the same sync throws), so only return those codes when they are actually true. A request-level 412 is milder: the client downloads, then retries.
-  - 400 and 409 count as permanent errors.
+  - 400 and 409 count as permanent errors, with one exception: a 409 whose `data` names a missing dependency makes the client mark that object for upload and retry. zotero.org sends `{"code":409,"message":"Collection K not found","data":{"collection":"K"}}`, the same with `Parent collection K not found`, and `{"message":"Parent item K not found","data":{"parentItem":"K"}}`. Without `data` the object fails on every sync, so gotero sends it too.
+  - A parent in the same request counts as existing only if its own write succeeds. A child whose in-batch parent fails gets that 409 instead of being stored with a dangling parent. zotero.org processes a batch in order and behaves the same way.
 - Each write locks its library row (`SELECT ... FOR UPDATE`), so writes to one library run one after another.
 - `DELETE` records each key in the deleted log at the new version and returns 204. Deleting a missing key is not an error.
+  - Cascades: children go with their parent item, sub-collections with their parent collection.
+  - Items leave a deleted collection **without a new version**, as on zotero.org. The client drops the membership locally when it erases the collection, without marking the items changed, and it takes the DELETE's `Last-Modified-Version` as its library version. Bumping the items would leave the deleting client with stale item versions, and its next edit of one would get a per-object 412 and force a full sync.
+  - `DELETE tags` does bump the items it strips, unlike zotero.org. The client deletes a tag by marking its items changed and uploading them before the tag deletion, so normally nothing carries the tag any more and nothing moves. If an item picked the tag up in between, the bump is the only way other clients learn about the removal, because Zotero ignores `deleted.tags`.
 - **Settings:** writing an unchanged value doesn't bump the version. Re-creating a deleted setting removes its deleted-log entry.
 - **Object JSON:**
   - Item `data` holds `key`, `version`, `itemType`, the fields, `creators`, `tags:[{tag, type?}]`, `collections:[]`, `relations:{}`, `dateAdded`, `dateModified`, and optionally `parentItem` and `deleted`.
@@ -123,6 +128,7 @@ gotero is a **clean-room** implementation. Don't copy code from the Zotero clien
    - The server writes `md5`, `mtime` and `filename` into the attachment and bumps its version, because ZFS clients don't send md5/mtime in their item uploads.
    - A repeat register of a key that is already registered, while the item still shows that file, answers 204 again with no version bump. Without that, the retried If-Match / If-None-Match would fail with 412 because the first call already changed the file.
 4. **Download:** `GET items/{k}/file` answers **302** (never 200).
+   - `Zotero-File-MD5` must describe the bytes behind `Location`, or the client rejects the download. gotero reads the file row before and after the item and retries if an upload registered in between.
    - Headers: `Location: <absolute self-authenticating URL>`, `Zotero-File-MD5`, `Zotero-File-Size`, `Zotero-File-Modification-Time` (ms), `Zotero-File-Compressed: Yes|No` (`Yes` for zipped snapshots), and `Cache-Control: no-store`.
    - The client follows the redirect **without** the API key, so the target carries a short-lived (5 min) HMAC token bound to the md5.
    - Return 404 when no file exists.
@@ -157,3 +163,24 @@ gotero is a **clean-room** implementation. Don't copy code from the Zotero clien
 - `md5` and `mtime` are `null` until a file has been uploaded.
 - Behind a reverse proxy, every absolute URL (upload url, download Location, loginURL) must use the public scheme and host. Take it from `GOTERO_PUBLIC_URL`, or from `X-Forwarded-*` only when the request comes from a trusted proxy.
 - `/retractions/list` and `tts/*` may return 404.
+
+## How the desktop client syncs
+
+Read from Zotero's sync engine (`syncEngine.js`, `syncLocal.js`). The multi-client simulation in `conformance/syncsim` models these rules, so a mismatch there points at the server.
+
+- **Upload before download.** Objects go up in batches with `If-Unmodified-Since-Version`, then deletions. After each successful batch the client stores the response's `Last-Modified-Version` as its library version.
+- **Patch mode.** An object synced before goes up as a patch against the cached server copy; cleared fields are sent as empty values. New objects go up in full with `version: 0`.
+- **`unchanged` objects** get the request's library version locally, so local object versions can be ahead of the server's.
+- **Settings** go up as `{"key": {"value": ...}}` without a version.
+- **Remote deletions:** tags are ignored. A setting is cleared only if unchanged locally. Synced objects are erased. An item changed locally becomes a conflict, unless it is in the local trash. A collection or search changed locally is kept with its old version; its next upload then fails with 404, and the full sync re-uploads it as new.
+- **Deleted here, changed there:** collections and searches are restored automatically, and the restored collection's items are fetched from `collections/K/items/top`. Items become a conflict, unless the remote copy is in the trash.
+- **Full sync** replays `deleted?since=0` first, then downloads every object whose local version is older, then resets every local object the server does not list to version 0 for re-upload.
+- **Download order:** each batch is applied top-level objects first. An object that cannot be saved yet, for example because its parent is missing or deleted locally, is retried on later syncs. A requested key the server no longer returns is only dropped from that retry queue; a local copy stays.
+
+Known client-side gaps, which no server can fix:
+
+- A local cascade erases descendants on the local tree. A sub-collection moved under a collection locally is erased when another client deletes that collection, even though on the server it lives elsewhere.
+- A collection kept after a remote deletion comes back as new, but its items' membership does not, because those items stay marked as synced.
+- A restored collection's membership is repaired from `collections/K/items/top`, which leaves out trashed items, and Zotero relies on that: it untrashes whatever comes back. A trashed member therefore stays out of the collection on that client while the server still has it there.
+- A child whose parent went away together with a parent this client deleted keeps a stale local copy, because the key the server no longer returns is only dropped from the retry queue.
+- Deleting a collection detaches its items without new versions (see above). If another client re-creates the collection before a third one syncs, the deletion never reaches the third client, and its items stay in the collection there. Bumping the detached items when the collection comes back would fix that client but give the re-creating client stale item versions, the full-sync problem the no-bump rule avoids, so gotero matches zotero.org here.

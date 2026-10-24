@@ -2,6 +2,7 @@ package adminapi_test
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -335,12 +336,39 @@ func TestSSOLinkByEmailSkipsAdmins(t *testing.T) {
 
 	// A regular user with a matching email is linked.
 	e.user("bob")
-	_, err := e.pool.Exec(ctx(), "UPDATE users SET email = 'bob@example.org' WHERE username = 'bob'")
+	_, err := e.pool.Exec(ctx(), "UPDATE users SET email = 'bob@example.org', email_verified = true WHERE username = 'bob'")
 	require.NoError(t, err)
 	e.oidc.SetClaims(map[string]any{"sub": "bob-sub", "email": "bob@example.org", "email_verified": true, "preferred_username": "bob"})
 	b := e.browser()
 	require.Equal(t, "/", e.oidcLogin(t, b, "").location())
 	assert.Equal(t, "bob", b.mustOK("GET", "/me", nil)["username"])
+}
+
+// Regression: a user could put someone else's address on their own account
+// and so receive that person's first SSO login.
+func TestSSOLinkByEmailNeedsVouchedEmail(t *testing.T) {
+	e := newSSOEnv(t, func(c *config.Config) { c.OIDC[0].LinkByEmail = true })
+	e.user("mallory")
+	m := e.login("mallory", "password-mallory")
+	m.mustOK("PATCH", "/me", map[string]any{"email": "alice@corp.example"})
+
+	e.oidc.SetClaims(map[string]any{"sub": "alice-sub", "email": "alice@corp.example", "email_verified": true, "preferred_username": "alice"})
+	assert.Equal(t, "/login?error=link_required", e.oidcLogin(t, e.browser(), "").location())
+
+	// Once an admin sets the address, gotero vouches for it.
+	admin := e.adminClient()
+	mal, err := e.store.Users().GetByUsername(ctx(), "mallory")
+	require.NoError(t, err)
+	admin.mustOK("PATCH", fmt.Sprintf("/admin/users/%d", mal.ID), map[string]any{"email": "alice@corp.example"})
+	b := e.browser()
+	require.Equal(t, "/", e.oidcLogin(t, b, "").location())
+	assert.Equal(t, "mallory", b.mustOK("GET", "/me", nil)["username"])
+
+	// Changing it again by themselves drops the vouching.
+	m.mustOK("PATCH", "/me", map[string]any{"email": "carol@corp.example"})
+	got, err := e.store.Users().GetByUsername(ctx(), "mallory")
+	require.NoError(t, err)
+	assert.False(t, got.EmailVerified)
 }
 
 func TestSSOLinkAsLoggedInAdmin(t *testing.T) {

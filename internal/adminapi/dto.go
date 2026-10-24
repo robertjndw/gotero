@@ -30,18 +30,20 @@ func tsPtr(t *time.Time) *string {
 }
 
 type userDTO struct {
-	ID          int64    `json:"id"`
-	Username    string   `json:"username"`
-	DisplayName string   `json:"displayName"`
-	Email       string   `json:"email"`
-	IsAdmin     bool     `json:"isAdmin"`
-	Disabled    bool     `json:"disabled"`
-	QuotaBytes  *int64   `json:"quotaBytes"`
-	UsedBytes   int64    `json:"usedBytes"`
-	CreatedAt   string   `json:"createdAt"`
-	LastSyncAt  *string  `json:"lastSyncAt"`
-	HasPassword bool     `json:"hasPassword"`
-	Providers   []string `json:"providers"`
+	ID          int64  `json:"id"`
+	Username    string `json:"username"`
+	DisplayName string `json:"displayName"`
+	Email       string `json:"email"`
+	// EmailVerified tells whether SSO may link by this address.
+	EmailVerified bool     `json:"emailVerified"`
+	IsAdmin       bool     `json:"isAdmin"`
+	Disabled      bool     `json:"disabled"`
+	QuotaBytes    *int64   `json:"quotaBytes"`
+	UsedBytes     int64    `json:"usedBytes"`
+	CreatedAt     string   `json:"createdAt"`
+	LastSyncAt    *string  `json:"lastSyncAt"`
+	HasPassword   bool     `json:"hasPassword"`
+	Providers     []string `json:"providers"`
 }
 
 type identityDTO struct {
@@ -106,7 +108,7 @@ func (a *API) userDTOWith(ctx context.Context, u repo.User, providers []string) 
 		providers = []string{}
 	}
 	return userDTO{
-		ID: u.ID, Username: u.Username, DisplayName: u.DisplayName, Email: u.Email,
+		ID: u.ID, Username: u.Username, DisplayName: u.DisplayName, Email: u.Email, EmailVerified: u.EmailVerified,
 		IsAdmin: u.IsAdmin, Disabled: u.Disabled, QuotaBytes: u.QuotaBytes, UsedBytes: lib.StorageUsed(),
 		CreatedAt: ts(u.CreatedAt), LastSyncAt: tsPtr(u.LastSyncAt),
 		HasPassword: u.PasswordHash != "", Providers: providers,

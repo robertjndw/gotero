@@ -2,20 +2,49 @@ package auth
 
 import (
 	"context"
+	"net/netip"
+	"slices"
 	"sync"
 	"time"
 )
 
-// Login guard limits. Attempts are counted per (username, IP) pair and per
-// IP. There is deliberately no per-username limit across all IPs: that would
-// let anyone lock the real user (typically "admin") out by guessing from
-// elsewhere.
+// Login guard limits. Attempts are counted per (username, source) pair and
+// per source, where a source is an IPv4 address or an IPv6 /64: a single
+// host usually holds a whole /64 and can rotate through it freely. IPv6
+// /48s get a wider budget on top, since that is what one site or customer
+// is typically given. There is deliberately no per-username limit across
+// all sources: that would let anyone lock the real user (typically "admin")
+// out by guessing from elsewhere.
 const (
 	maxPairAttempts = 10
 	maxIPAttempts   = 50
+	maxNetAttempts  = 200
 	attemptWindow   = 15 * time.Minute
 	maxGuardKeys    = 100_000
 )
+
+type guardKey struct {
+	key   string
+	limit int
+}
+
+// guardKeys names the counters one attempt draws from.
+func guardKeys(username, ip string) []guardKey {
+	src, wide := ip, ""
+	if a, err := netip.ParseAddr(ip); err == nil {
+		a = a.Unmap().WithZone("")
+		src = a.String()
+		if a.Is6() {
+			src = netip.PrefixFrom(a, 64).Masked().String()
+			wide = netip.PrefixFrom(a, 48).Masked().String()
+		}
+	}
+	keys := []guardKey{{"u:" + username + "\x00" + src, maxPairAttempts}, {"ip:" + src, maxIPAttempts}}
+	if wide != "" {
+		keys = append(keys, guardKey{"net:" + wide, maxNetAttempts})
+	}
+	return keys
+}
 
 // LoginGuard throttles password logins and caps how many argon2 checks run
 // at once. Both matter: argon2 costs ~19 MiB per verification, so unbounded
@@ -48,22 +77,45 @@ func (g *LoginGuard) Attempt(username, ip string) (time.Duration, bool) {
 	defer g.mu.Unlock()
 	now := g.now()
 	g.sweep(now)
-	pair, ipKey := "u:"+username+"\x00"+ip, "ip:"+ip
-	for key, limit := range map[string]int{pair: maxPairAttempts, ipKey: maxIPAttempts} {
-		ts := g.live(key, now)
-		if len(ts) >= limit {
-			return ts[len(ts)-limit].Add(attemptWindow).Sub(now), false
+	keys := guardKeys(username, ip)
+	for _, k := range keys {
+		ts := g.live(k.key, now)
+		if len(ts) >= k.limit {
+			return ts[len(ts)-k.limit].Add(attemptWindow).Sub(now), false
 		}
 	}
-	for _, key := range []string{pair, ipKey} {
-		if _, ok := g.attempts[key]; !ok && len(g.attempts) >= maxGuardKeys {
-			// Under a spray of fresh keys, fail closed for new keys rather
-			// than grow without bound.
-			return time.Minute, false
+	for _, k := range keys {
+		if _, ok := g.attempts[k.key]; !ok && len(g.attempts) >= maxGuardKeys {
+			g.evict(now, keys)
 		}
-		g.attempts[key] = append(g.attempts[key], now)
+		g.attempts[k.key] = append(g.attempts[k.key], now)
 	}
 	return 0, true
+}
+
+// evict makes room for a new key. Refusing new keys instead would let a
+// spray from many sources lock out everyone else. A full table consists
+// mostly of the sprayer's own keys, so dropping a random one rarely helps
+// anyone but them, and each source's budget still bounds what they gain.
+// keep are the counters of the attempt being recorded; dropping one of them
+// would forget part of this very attempt.
+func (g *LoginGuard) evict(now time.Time, keep []guardKey) {
+	// Sweeping early frees expired keys before live ones get dropped, but a
+	// spray refills the table at once, so a forced full scan on every
+	// eviction would serialize all logins behind it. Cap it at once a second.
+	if now.Sub(g.swept) >= time.Second {
+		g.swept = time.Time{}
+		g.sweep(now)
+	}
+	for len(g.attempts) >= maxGuardKeys {
+		for k := range g.attempts {
+			if slices.ContainsFunc(keep, func(gk guardKey) bool { return gk.key == k }) {
+				continue
+			}
+			delete(g.attempts, k)
+			break
+		}
+	}
 }
 
 // Succeeded forgives the pair's attempts after a correct password and
@@ -74,13 +126,15 @@ func (g *LoginGuard) Attempt(username, ip string) (time.Duration, bool) {
 func (g *LoginGuard) Succeeded(username, ip string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	delete(g.attempts, "u:"+username+"\x00"+ip)
-	key := "ip:" + ip
-	if ts := g.attempts[key]; len(ts) > 0 {
-		if len(ts) == 1 {
-			delete(g.attempts, key)
-		} else {
-			g.attempts[key] = ts[:len(ts)-1]
+	keys := guardKeys(username, ip)
+	delete(g.attempts, keys[0].key)
+	for _, k := range keys[1:] {
+		if ts := g.attempts[k.key]; len(ts) > 0 {
+			if len(ts) == 1 {
+				delete(g.attempts, k.key)
+			} else {
+				g.attempts[k.key] = ts[:len(ts)-1]
+			}
 		}
 	}
 }

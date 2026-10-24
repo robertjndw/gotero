@@ -73,7 +73,10 @@ There are several layers of tests:
 |---|---|---|
 | Unit and integration | `make test` | Every package, against real PostgreSQL, S3 (versitygw) and WebDAV containers, with the race detector |
 | Fuzzing | `scripts/fuzz.sh 30s` | Parsers and protocol messages never panic or misbehave on hostile input |
-| Conformance kit | see below | gotero answers every protocol request the way Zotero expects: 104 tests across auth, groups, writes, reads, deletions, settings, tags, full text, files, streaming, login sessions and known quirks |
+| Conformance kit | see below | gotero answers every protocol request the way Zotero expects: 128 tests across auth, groups, writes, reads, deletions, settings, tags, full text, files, streaming, login sessions and known quirks |
+| Multi-client simulation | part of `make test` | Several simulated Zotero clients edit one library concurrently, over a network that loses requests and responses and through server crashes, and still converge without losing an acknowledged write (see below) |
+| Operations | `scripts/ops-test.sh [OLD_REF]` | With the real images: clients sync through an upgrade from `OLD_REF` and repeated `docker kill`s, the conformance kit passes on the upgraded data, and a backup made as [install](install.md#backups) describes restores into a server every client accepts unchanged |
+| Load | `GOTERO_LOAD=1 go test -run TestLoad -v -timeout 60m ./internal/server` | Seeds a 55,000-item library, times a new device's full sync, then 50 clients syncing and editing at once, and fails on any error. `GOTERO_LOAD_ITEMS`, `_CLIENTS` and `_SECONDS` resize it |
 | JS contracts | `e2e/contract/run.sh` | Zotero's own sync client code (fetched at a pinned release, never committed) accepts gotero's responses |
 | Desktop end-to-end | `e2e/desktop/run.sh` | Real Zotero desktop builds sync with each other through gotero, including conflicts, files and groups |
 
@@ -88,7 +91,30 @@ GOTERO_CONFORMANCE_ADMIN_USER=admin GOTERO_CONFORMANCE_ADMIN_PASS=... \
 
 The kit also runs in-process in `internal/zapi`'s tests, so `make test` covers it as well.
 
-CI runs every layer: `ci.yml` (lint, tests, fuzzing, licenses, image build), `conformance.yml` (each storage backend), `contracts.yml` and `desktop-e2e.yml` (nightly, on tags, and on pull requests labelled `e2e-desktop`).
+### Multi-client simulation
+
+`conformance/syncsim` simulates Zotero desktop clients, each with its own local database, syncing one library the way the real client does. That covers upload-then-download with `If-Unmodified-Since-Version`, three-way merges, delete conflicts, full syncs after a per-object 412, ZFS file sync and stream-triggered syncs. The client rules it follows are listed in [protocol notes](dev/protocol-notes.md#how-the-desktop-client-syncs). After the random workload, it checks that:
+
+- every client agrees with the server, objects, settings and file bytes alike;
+- no acknowledged write was lost or changed at the same version;
+- versions only move forward and no two writes share one;
+- the server has no dangling parents, collection cycles or objects both alive and deleted, and incremental listings match the full one;
+- every client heard the final version on the stream.
+
+`TestMultiClientSync` in `internal/server` runs it against the full application, stream hub included, with one seed per scenario. Scenarios cover several devices of one user, group members, real concurrency, lost requests and responses, heavy contention, and server crashes: the `crash` scenarios cut every connection, close the database pool mid-transaction and start a fresh instance on the same database and files. Stepped scenarios interleave deterministically, so their failures replay exactly.
+
+Where Zotero itself leaves a client out of step, which would happen against zotero.org too, the simulation repairs that client's state and says so in its trace, so the gap does not hide server bugs. The gaps are listed in [protocol notes](dev/protocol-notes.md#how-the-desktop-client-syncs).
+
+```sh
+go test ./internal/server -run TestMultiClientSync                                    # as in make test
+SYNCSIM_RUNS=50 go test -race ./internal/server -run TestMultiClientSync               # soak
+SYNCSIM_SEED=1007 go test ./internal/server -run 'TestMultiClientSync/stepped/devices'  # replay a failure
+SYNCSIM_ARTIFACTS=/tmp/sim go test ./internal/server -run TestMultiClientSync           # save client traces of failures
+```
+
+A failure prints its seed, every inconsistency and each client's recent requests and decisions. `SYNCSIM_STEPS` changes the workload length. The same simulation runs against the Docker image in `conformance.yml` (`TestSyncSim` in `conformance/gotero`), and `syncsim-soak.yml` runs 50 fresh seeds per scenario plus `scripts/ops-test.sh` nightly.
+
+CI runs every layer: `ci.yml` (lint, tests, fuzzing, licenses, image build), `conformance.yml` (each storage backend, conformance kit and simulation), `syncsim-soak.yml` (nightly soak and operations test), `contracts.yml` and `desktop-e2e.yml` (nightly, on tags, and on pull requests labelled `e2e-desktop`).
 
 ## Linting
 

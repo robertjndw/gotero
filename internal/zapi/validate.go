@@ -18,6 +18,8 @@ import (
 type writeError struct {
 	Code int
 	Msg  string
+	// Data goes out as the failure's "data" object.
+	Data json.RawMessage
 }
 
 func (e *writeError) Error() string { return e.Msg }
@@ -28,6 +30,15 @@ func badRequest(format string, args ...any) *writeError {
 
 func conflict(format string, args ...any) *writeError {
 	return &writeError{Code: http.StatusConflict, Msg: fmt.Sprintf(format, args...)}
+}
+
+// missingRef is the 409 for a reference to an object the server does not
+// have. Zotero reads data.collection or data.parentItem, marks that object
+// for upload and retries, so a dependency that got lost repairs itself. The
+// messages match zotero.org's.
+func missingRef(field, key, format string) *writeError {
+	data, _ := json.Marshal(map[string]string{field: key})
+	return &writeError{Code: http.StatusConflict, Msg: fmt.Sprintf(format, key), Data: data}
 }
 
 var childItemTypes = map[string]bool{"note": true, "attachment": true, "annotation": true}

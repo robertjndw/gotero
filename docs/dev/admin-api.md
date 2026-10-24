@@ -24,6 +24,7 @@ This is the API the web UI uses. It is separate from the Zotero API and is mount
 ```ts
 type User = {
   id: number; username: string; displayName: string; email: string;
+  emailVerified: boolean;                            // set by an admin, the CLI, an invite or an IdP; only these link by email
   isAdmin: boolean; disabled: boolean;
   quotaBytes: number | null; usedBytes: number;
   createdAt: string; lastSyncAt: string | null;

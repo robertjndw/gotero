@@ -14,7 +14,7 @@ import (
 // Column order must match the field order of the repo struct, because rows
 // are scanned with RowToStructByPos.
 const userCols = `id, library_id, username::text, display_name, COALESCE(email::text, ''),
-	password_hash, is_admin, disabled, quota_bytes, created_at, last_sync_at`
+	email_verified, password_hash, is_admin, disabled, quota_bytes, created_at, last_sync_at`
 
 type userRepo struct{ pool *pgxpool.Pool }
 
@@ -82,10 +82,11 @@ func (r userRepo) create(ctx context.Context, u repo.User, ident *repo.Identity,
 		}
 		_, err := allocateID(ctx, tx, "user_id_seq", u.ID, func(id int64) (bool, error) {
 			tag, err := tx.Exec(ctx, `
-				INSERT INTO users (id, library_id, username, display_name, email, password_hash, is_admin, disabled, quota_bytes)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+				INSERT INTO users (id, library_id, username, display_name, email, email_verified, password_hash, is_admin, disabled, quota_bytes)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 				ON CONFLICT (id) DO NOTHING`,
-				id, libID, u.Username, u.DisplayName, nullIfEmpty(u.Email), u.PasswordHash, u.IsAdmin, u.Disabled, u.QuotaBytes)
+				id, libID, u.Username, u.DisplayName, nullIfEmpty(u.Email), u.Email != "" && u.EmailVerified,
+				u.PasswordHash, u.IsAdmin, u.Disabled, u.QuotaBytes)
 			return tag.RowsAffected() == 1, err
 		})
 		if err != nil {
@@ -180,10 +181,11 @@ func (r userRepo) List(ctx context.Context, q string, limit int, cursor int64) (
 
 func (r userRepo) Update(ctx context.Context, u repo.User) (repo.User, error) {
 	rows, err := r.pool.Query(ctx, `
-		UPDATE users SET username = $2, display_name = $3, email = $4, password_hash = $5,
-			is_admin = $6, disabled = $7, quota_bytes = $8
+		UPDATE users SET username = $2, display_name = $3, email = $4, email_verified = $5, password_hash = $6,
+			is_admin = $7, disabled = $8, quota_bytes = $9
 		WHERE id = $1 RETURNING `+userCols,
-		u.ID, u.Username, u.DisplayName, nullIfEmpty(u.Email), u.PasswordHash, u.IsAdmin, u.Disabled, u.QuotaBytes)
+		u.ID, u.Username, u.DisplayName, nullIfEmpty(u.Email), u.Email != "" && u.EmailVerified,
+		u.PasswordHash, u.IsAdmin, u.Disabled, u.QuotaBytes)
 	if err != nil {
 		return repo.User{}, wrap("update user", err)
 	}

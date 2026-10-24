@@ -243,17 +243,21 @@ type ImportedObject struct {
 // Users
 
 type User struct {
-	ID           int64
-	LibraryID    int64
-	Username     string
-	DisplayName  string
-	Email        string
-	PasswordHash string
-	IsAdmin      bool
-	Disabled     bool
-	QuotaBytes   *int64
-	CreatedAt    time.Time
-	LastSyncAt   *time.Time
+	ID          int64
+	LibraryID   int64
+	Username    string
+	DisplayName string
+	Email       string
+	// EmailVerified is set only when gotero can vouch for Email: an admin
+	// or the CLI set it, it came from an invite issued for it, or an
+	// identity provider asserted it. SSO links by email only to these.
+	EmailVerified bool
+	PasswordHash  string
+	IsAdmin       bool
+	Disabled      bool
+	QuotaBytes    *int64
+	CreatedAt     time.Time
+	LastSyncAt    *time.Time
 }
 
 type UserRepo interface {

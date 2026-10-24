@@ -94,6 +94,19 @@ func dsnFor(db string) string {
 // or when Docker is not available.
 func New(tb testing.TB) *pgxpool.Pool {
 	tb.Helper()
+	pool, err := pgxpool.New(context.Background(), NewDSN(tb))
+	if err != nil {
+		tb.Fatalf("connect test database: %v", err)
+	}
+	tb.Cleanup(pool.Close)
+	return pool
+}
+
+// NewDSN creates a fresh database like New and returns its connection
+// string, for tests that open and close their own pools, such as ones that
+// restart the server.
+func NewDSN(tb testing.TB) string {
+	tb.Helper()
 	if testing.Short() {
 		tb.Skip("skipping database test in -short mode")
 	}
@@ -110,20 +123,16 @@ func New(tb testing.TB) *pgxpool.Pool {
 		tb.Fatalf("pgtest: %v", startOK)
 	}
 
-	ctx := context.Background()
 	name := fmt.Sprintf("test_%d", counter.Add(1))
-	if _, err := admin.Exec(ctx, fmt.Sprintf(`CREATE DATABASE %s TEMPLATE %s`, name, template)); err != nil {
+	if _, err := admin.Exec(context.Background(), fmt.Sprintf(`CREATE DATABASE %s TEMPLATE %s`, name, template)); err != nil {
 		tb.Fatalf("create test database: %v", err)
 	}
-	pool, err := pgxpool.New(ctx, dsnFor(name))
-	if err != nil {
-		tb.Fatalf("connect test database: %v", err)
-	}
+	// Registered first, so it runs after the cleanups of whatever the test
+	// connects; FORCE drops any connection that is still open anyway.
 	tb.Cleanup(func() {
-		pool.Close()
 		_, _ = admin.Exec(context.Background(), `DROP DATABASE IF EXISTS `+name+` WITH (FORCE)`)
 	})
-	return pool
+	return dsnFor(name)
 }
 
 func dockerHealthy() error {

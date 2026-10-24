@@ -42,6 +42,7 @@ type Server struct {
 	http    *http.Server
 	jobs    *jobs.Runner
 	imports *importer.Worker
+	hub     *stream.Hub
 }
 
 // New builds the complete application. ctx is only used for setup work
@@ -56,7 +57,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, pool *pgxpoo
 		return nil, err
 	}
 
-	store := pg.New(pool, pg.WithAcquireTimeout(cfg.DBAcquireTimeout))
+	store := pg.New(pool, pg.WithAcquireTimeout(cfg.DBAcquireTimeout), pg.WithLockTimeout(cfg.DBLockTimeout))
 	authn := auth.NewAuthenticator(store.Keys(), store.Users())
 	acct := accounts.New(store, authn, cfg, log)
 	if err := acct.EnsureBootstrapAdmin(ctx, cfg.Admin); err != nil {
@@ -75,7 +76,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, pool *pgxpoo
 		Notifier:     hub,
 	})
 
-	s := &Server{cfg: cfg, log: log, pool: pool, jobs: runner, imports: imports}
+	s := &Server{cfg: cfg, log: log, pool: pool, jobs: runner, imports: imports, hub: hub}
 
 	gin.SetMode(gin.ReleaseMode)
 	engine := gin.New()
@@ -165,6 +166,7 @@ func (s *Server) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
 	wg.Go(func() { s.jobs.Run(jobsCtx) })
 	wg.Go(func() { s.imports.Run(jobsCtx) })
+	wg.Go(func() { s.revalidateStreams(jobsCtx) })
 
 	errc := make(chan error, 1)
 	go func() { errc <- s.http.Serve(ln) }()
@@ -184,6 +186,23 @@ func (s *Server) Run(ctx context.Context) error {
 		err = nil
 	}
 	return err
+}
+
+// streamRevalidateInterval bounds how long an open stream keeps hearing
+// about a library after access to it was removed from outside the server.
+const streamRevalidateInterval = time.Minute
+
+func (s *Server) revalidateStreams(ctx context.Context) {
+	t := time.NewTicker(streamRevalidateInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			s.hub.Revalidate(ctx)
+		}
+	}
 }
 
 func (s *Server) handleHealth(c *gin.Context) {

@@ -152,7 +152,7 @@ func (c cli) userAdd(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	u, err := c.s.CreateUser(ctx, CreateUserInput{ID: *id, Username: pos[0], Password: password, Email: *email, IsAdmin: *admin})
+	u, err := c.s.CreateUser(ctx, CreateUserInput{ID: *id, Username: pos[0], Password: password, Email: *email, IsAdmin: *admin, EmailVerified: true})
 	if err != nil {
 		return describe(err)
 	}
