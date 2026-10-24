@@ -1,5 +1,8 @@
 # gotero
 
+[![CI](https://github.com/robertjndw/gotero/actions/workflows/ci.yml/badge.svg)](https://github.com/robertjndw/gotero/actions/workflows/ci.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 A self-hosted sync server for Zotero, written in Go.
 
 Point your Zotero desktop app at gotero instead of zotero.org and it syncs your library, your groups and your attachment files with a server you control. The client needs no patch or plugin, only two changed preferences.
@@ -14,6 +17,12 @@ Point your Zotero desktop app at gotero instead of zotero.org and it syncs your 
 - Ships as a single static binary; the only other dependency is PostgreSQL.
 
 > gotero is an independent project and is not affiliated with or endorsed by the Zotero project. "Zotero" is a trademark of the Corporation for Digital Scholarship.
+
+<p align="center">
+  <img src="docs/images/dashboard.png" alt="Dashboard with the Zotero connection settings" width="32%">
+  <img src="docs/images/users.png" alt="User management" width="32%">
+  <img src="docs/images/groups.png" alt="Group libraries" width="32%">
+</p>
 
 ## Quick start (Docker Compose)
 
