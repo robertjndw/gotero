@@ -380,6 +380,46 @@ func TestPlanSearches(t *testing.T) {
 	}
 }
 
+// A child whose parent is in the same request must not be saved when the
+// parent fails, or the library ends up with a dangling reference.
+func TestPlanFailsOrphansOfFailedParents(t *testing.T) {
+	f := newFakeLib()
+	res := plan(t, f, opts(repo.TypeCollection, false),
+		`{"key":"PARENTA2","version":5,"name":"deleted elsewhere"}`,
+		`{"key":"CHILDAA2","name":"child","parentCollection":"PARENTA2"}`,
+		`{"key":"GRANDCH2","name":"grandchild","parentCollection":"CHILDAA2"}`,
+		`{"key":"QKPAREN2","name":"fine"}`,
+		`{"key":"QKCHILD2","name":"fine child","parentCollection":"QKPAREN2"}`,
+	)
+	assert.Equal(t, 404, res[0].Fail.Code)
+	for _, i := range []int{1, 2} {
+		assert.Equal(t, outFailed, res[i].Status, i)
+		assert.Equal(t, 409, res[i].Fail.Code, i)
+	}
+	assert.JSONEq(t, `{"collection":"PARENTA2"}`, string(res[1].Fail.Data))
+	assert.JSONEq(t, `{"collection":"CHILDAA2"}`, string(res[2].Fail.Data))
+	assert.Equal(t, outCreated, res[3].Status)
+	assert.Equal(t, outCreated, res[4].Status)
+
+	items := plan(t, f, opts(repo.TypeItem, false),
+		`{"key":"BADPARE2","itemType":"nope"}`,
+		`{"key":"NQTEAAA2","itemType":"note","note":"x","parentItem":"BADPARE2"}`,
+	)
+	assert.Equal(t, 400, items[0].Fail.Code)
+	assert.Equal(t, 409, items[1].Fail.Code)
+	assert.JSONEq(t, `{"parentItem":"BADPARE2"}`, string(items[1].Fail.Data))
+
+	// A stored parent whose own entry fails to parse still exists, so its
+	// child is fine.
+	f.put(repo.TypeCollection, "STPAREN2", 3, `{"key":"STPAREN2","version":3,"name":"p","parentCollection":false,"relations":{}}`)
+	stored := plan(t, f, opts(repo.TypeCollection, false),
+		`{"key":"STPAREN2","version":"bad","name":"p"}`,
+		`{"key":"STCHILD2","name":"child","parentCollection":"STPAREN2"}`,
+	)
+	assert.Equal(t, 400, stored[0].Fail.Code)
+	assert.Equal(t, outCreated, stored[1].Status)
+}
+
 func TestPlanBatchBookkeeping(t *testing.T) {
 	f := newFakeLib()
 	f.put(repo.TypeItem, "AAAAAAA2", 7, storedBook)

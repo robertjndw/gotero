@@ -25,7 +25,7 @@ func login(id accounts.ExternalIdentity, p accounts.ExternalPolicy) accounts.Ext
 func mkUser(t *testing.T, svc *accounts.Service, name, email string, admin bool) repo.User {
 	t.Helper()
 	u, err := svc.CreateUser(ctx(), accounts.CreateUserInput{
-		Username: name, Password: "long-enough-pw", Email: email, IsAdmin: admin,
+		Username: name, Password: "long-enough-pw", Email: email, IsAdmin: admin, EmailVerified: true,
 	})
 	require.NoError(t, err)
 	return u
@@ -196,6 +196,16 @@ func TestLoginExternalEmailLink(t *testing.T) {
 		// The password keeps working.
 		_, err = svc.Authenticate(ctx(), "local", "long-enough-pw")
 		assert.NoError(t, err)
+	})
+	t.Run("address nobody vouched for", func(t *testing.T) {
+		_, err := svc.CreateUser(ctx(), accounts.CreateUserInput{
+			Username: "claimer", Password: "long-enough-pw", Email: "claimed@example.com",
+		})
+		require.NoError(t, err)
+		_, err = svc.LoginExternal(ctx(), login(extID("s2", "claimed@example.com"), accounts.ExternalPolicy{LinkByEmail: true, AutoProvision: true}))
+		assert.ErrorIs(t, err, accounts.ErrLinkRequired)
+		_, err = store.Identities().Get(ctx(), "corp", "s2")
+		assert.ErrorIs(t, err, repo.ErrNotFound)
 	})
 	t.Run("subject changed for linked provider", func(t *testing.T) {
 		_, err := svc.LoginExternal(ctx(), login(extID("s-new", "local@example.com"), accounts.ExternalPolicy{LinkByEmail: true}))

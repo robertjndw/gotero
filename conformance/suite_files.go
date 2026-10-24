@@ -40,13 +40,14 @@ type fileSpec struct {
 	mtime int64
 }
 
-func md5hex(b []byte) string {
+// MD5Hex is the hex md5 Zotero uses as a file checksum.
+func MD5Hex(b []byte) string {
 	s := md5.Sum(b) //nolint:gosec // see import
 	return hex.EncodeToString(s[:])
 }
 
 func newFileSpec(name string, data []byte) fileSpec {
-	return fileSpec{name: name, data: data, md5: md5hex(data), mtime: time.Now().UnixMilli()}
+	return fileSpec{name: name, data: data, md5: MD5Hex(data), mtime: time.Now().UnixMilli()}
 }
 
 func (f fileSpec) form() url.Values {
@@ -394,7 +395,7 @@ func testFilesLarge(t *testing.T, e *env) {
 	mustStatus(t, r, 302)
 	dl := e.do(t, "GET", mustHeader(t, r, "Location"))
 	mustStatus(t, dl, 200)
-	if len(dl.Body) != size || md5hex(dl.Body) != sum {
-		t.Errorf("downloaded %d bytes with md5 %s, want %d bytes with %s", len(dl.Body), md5hex(dl.Body), size, sum)
+	if len(dl.Body) != size || MD5Hex(dl.Body) != sum {
+		t.Errorf("downloaded %d bytes with md5 %s, want %d bytes with %s", len(dl.Body), MD5Hex(dl.Body), size, sum)
 	}
 }

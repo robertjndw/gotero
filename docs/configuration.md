@@ -22,6 +22,7 @@ gotero is configured entirely with environment variables, all starting with `GOT
 | `GOTERO_DELETED_LOG_RETENTION` | `0` | How long to remember deleted objects so clients can learn about deletions. `0` keeps them forever. A duration such as `4320h` (180 days) prunes older records. **Warning:** a client that has not synced within this window gets `409` on its next sync and cannot recover; Zotero retries and fails with "library in use", and the only fix is to reset that client's local data. Leave at `0` unless the log's size is a real problem. Negative values are rejected. |
 | `GOTERO_DB_MAX_CONNS` | `20` | Size of the database connection pool. A `pool_max_conns` parameter in `GOTERO_DATABASE_URL` takes precedence. Keep it below PostgreSQL's `max_connections`. |
 | `GOTERO_DB_ACQUIRE_TIMEOUT` | `10s` | How long a request waits for a free database connection before it is turned away with `503` and a `Retry-After` header. `0` waits as long as the client does. |
+| `GOTERO_DB_LOCK_TIMEOUT` | `10s` | How long a write waits behind other writes to the same library before it is turned away with `503` and a `Retry-After` header. Zotero retries after the wait. `0` waits as long as the client does. |
 | `GOTERO_MAX_REQUEST_BYTES` | `134217728` (128 MiB) | Size limit for API request bodies after decompression. Full-text uploads are the largest. |
 | `GOTERO_MAX_UPLOAD_BYTES` | `0` (unlimited) | Size limit for a single attachment file. |
 
@@ -44,7 +45,7 @@ Users can sign in through OpenID Connect or SAML 2.0 identity providers in addit
 
 **How sign-in maps to accounts.** On each SSO sign-in, gotero looks for an account in this order:
 1. An account already linked to this provider account.
-2. With `LINK_BY_EMAIL=true`: an existing account with the same, verified email. It gets linked. Admin accounts are never linked this way.
+2. With `LINK_BY_EMAIL=true`: an existing account with the same email, if the provider says the email is verified and gotero vouches for the account's address. gotero vouches for an address that an admin or the CLI set, that came from an invite issued for it, or that a provider asserted. An address users typed in themselves doesn't count, because anyone could claim someone else's. Those users sign in with their password and connect the provider from their account page. Addresses on accounts that existed before gotero tracked this count only if a linked provider asserted them; an admin can vouch for the others by saving them again. Admin accounts are never linked this way.
 3. An invite link the user started from. The invite's email, if set, must match.
 4. With `AUTO_PROVISION=true`: a new account. The username comes from the provider (or the email), with a number appended if it's taken.
 

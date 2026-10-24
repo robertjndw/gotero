@@ -132,7 +132,7 @@ func isTokenChars(s string) bool {
 }
 
 func (a *API) setSSOCookie(c *gin.Context, name, value string, maxAge int) {
-	a.writeCookie(c, &http.Cookie{Name: name, Value: value, Path: ssoCookiePath, MaxAge: maxAge})
+	a.writeCookie(c, name, value, ssoCookiePath, maxAge, time.Time{})
 }
 
 func (a *API) clearSSOCookies(c *gin.Context) {

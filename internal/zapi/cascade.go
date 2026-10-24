@@ -94,7 +94,7 @@ func deleteKeys(ctx context.Context, tx repo.LibraryTx, t repo.ObjectType, keys 
 		if err != nil {
 			return err
 		}
-		if err := detachItems(ctx, tx, all, ver); err != nil {
+		if err := detachItems(ctx, tx, all); err != nil {
 			return err
 		}
 		_, err = tx.DeleteObjects(ctx, t, all, ver)
@@ -106,8 +106,13 @@ func deleteKeys(ctx context.Context, tx repo.LibraryTx, t repo.ObjectType, keys 
 }
 
 // detachItems removes the collections from every item that is in one of
-// them. Those items change, so they get the new version and clients see it.
-func detachItems(ctx context.Context, tx repo.LibraryTx, collections []string, ver int64) error {
+// them. The items keep their versions, as on zotero.org. Zotero drops the
+// membership locally when it deletes a collection, or when it learns of the
+// deletion, without marking the items changed. The deleting client takes the
+// DELETE's version as its library version, so bumping the items would leave
+// it with stale item versions, and its next edit of one would fail with 412
+// and force a full sync.
+func detachItems(ctx context.Context, tx repo.LibraryTx, collections []string) error {
 	gone := map[string]bool{}
 	for _, k := range collections {
 		gone[k] = true
@@ -137,7 +142,7 @@ func detachItems(ctx context.Context, tx repo.LibraryTx, collections []string, v
 		if err := m.SetValue("collections", nonNilStrings(cols)); err != nil {
 			return err
 		}
-		no, err := rebuildItem(o.Key, m, ver)
+		no, err := rebuildItem(o.Key, m, o.Version)
 		if err != nil {
 			return err
 		}

@@ -68,20 +68,22 @@ func (a *API) secureCookies(c *gin.Context) bool {
 }
 
 func (a *API) setCookie(c *gin.Context, token string, expires time.Time) {
-	a.writeCookie(c, &http.Cookie{
-		Name: cookieName, Value: token, Path: "/", Expires: expires, MaxAge: int(sessionLifetime / time.Second),
-	})
+	a.writeCookie(c, cookieName, token, "/", int(sessionLifetime/time.Second), expires)
 }
 
 func (a *API) clearCookie(c *gin.Context) {
-	a.writeCookie(c, &http.Cookie{Name: cookieName, Value: "", Path: "/", MaxAge: -1})
+	a.writeCookie(c, cookieName, "", "/", -1, time.Time{})
 }
 
-// writeCookie sets the flags every cookie of this API shares.
-func (a *API) writeCookie(c *gin.Context, ck *http.Cookie) {
-	ck.HttpOnly, ck.Secure, ck.SameSite = true, a.secureCookies(c), http.SameSiteLaxMode
-	//nolint:gosec // Secure follows the public URL scheme; plain http is allowed for local setups.
-	http.SetCookie(c.Writer, ck)
+// writeCookie is the only place cookies of this API are made, so they all
+// get the same flags.
+func (a *API) writeCookie(c *gin.Context, name, value, path string, maxAge int, expires time.Time) {
+	// Secure follows the public URL scheme, so plain http keeps working for
+	// local setups; gosec only accepts a constant true.
+	http.SetCookie(c.Writer, &http.Cookie{ //nolint:gosec // see above
+		Name: name, Value: value, Path: path, MaxAge: maxAge, Expires: expires,
+		HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: a.secureCookies(c),
+	})
 }
 
 // startSession creates a session for u, sets the cookie and the CSRF header.

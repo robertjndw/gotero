@@ -175,6 +175,9 @@ type CreateUserInput struct {
 	DisplayName string
 	IsAdmin     bool
 	Quota       Optional[int64]
+	// EmailVerified records that whoever creates the account vouches for
+	// Email. Self-service signups must leave it false.
+	EmailVerified bool
 }
 
 func (in CreateUserInput) validate() error {
@@ -215,7 +218,7 @@ func (s *Service) buildUser(ctx context.Context, in CreateUserInput) (repo.User,
 		name = in.Username
 	}
 	return repo.User{
-		ID: in.ID, Username: in.Username, DisplayName: name, Email: in.Email,
+		ID: in.ID, Username: in.Username, DisplayName: name, Email: in.Email, EmailVerified: in.EmailVerified,
 		PasswordHash: hash, IsAdmin: in.IsAdmin, QuotaBytes: quota,
 	}, nil
 }
@@ -276,6 +279,7 @@ func (s *Service) EnsureBootstrapAdmin(ctx context.Context, c config.AdminBootst
 	}
 	u, err := s.CreateUser(ctx, CreateUserInput{
 		Username: c.Username, Password: c.Password, Email: c.Email, IsAdmin: true, Quota: Null[int64](),
+		EmailVerified: true,
 	})
 	if err != nil {
 		return fmt.Errorf("create bootstrap admin: %w", err)
@@ -334,6 +338,9 @@ type UserPatch struct {
 	Disabled    *bool
 	Quota       Optional[int64]
 	Password    *string
+	// EmailVerified is the actor vouching for Email: true for admins and
+	// the CLI. A user changing their own address leaves it unverified.
+	EmailVerified bool
 }
 
 // UpdateUser applies a partial update. actorID is the administrator making
@@ -375,6 +382,12 @@ func (s *Service) UpdateUser(ctx context.Context, id int64, p UserPatch, actorID
 		u.DisplayName = *p.DisplayName
 	}
 	if p.Email != nil {
+		switch {
+		case p.EmailVerified:
+			u.EmailVerified = true
+		case !strings.EqualFold(*p.Email, u.Email):
+			u.EmailVerified = false
+		}
 		u.Email = *p.Email
 	}
 	if p.IsAdmin != nil {
@@ -481,6 +494,7 @@ func (s *Service) Register(ctx context.Context, in CreateUserInput, inviteToken 
 		in.IsAdmin = false
 		in.ID = 0
 		in.Quota = Optional[int64]{}
+		in.EmailVerified = false
 		return s.CreateUser(ctx, in)
 	}
 
@@ -494,6 +508,8 @@ func (s *Service) Register(ctx context.Context, in CreateUserInput, inviteToken 
 		}
 		in.Email = inv.Email
 	}
+	// Only an invite issued for an address proves anything about it.
+	in.EmailVerified = inv.Email != ""
 	in.IsAdmin = inv.IsAdmin
 	in.ID = 0
 	in.Quota = Optional[int64]{}

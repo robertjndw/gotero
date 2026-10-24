@@ -3,6 +3,7 @@ package stream
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -21,11 +22,15 @@ import (
 type fakeResolver struct {
 	mu   sync.Mutex
 	keys map[string][]string // key -> topics
+	down bool                // every lookup fails, like an unreachable database
 }
 
 func (f *fakeResolver) KeyTopics(_ context.Context, key string) (int64, []string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.down {
+		return 0, nil, errors.New("database unreachable")
+	}
 	t, ok := f.keys[key]
 	if !ok {
 		return 0, nil, ErrInvalidKey
@@ -167,6 +172,27 @@ func TestHandshakeKey(t *testing.T) {
 	}
 }
 
+// A key that cannot be checked right now must not leave the connection open
+// without its subscription: the client would never hear about changes.
+func TestTemporaryResolveFailureClosesRetryably(t *testing.T) {
+	_, r, url := setup(t)
+	r.mu.Lock()
+	r.down = true
+	r.mu.Unlock()
+
+	c := dial(t, url, nil)
+	c.expectEvent("connected")
+	c.send(map[string]any{"action": "createSubscriptions", "subscriptions": []any{map[string]any{"apiKey": "KEY"}}})
+	if code := c.closeCode(); code != websocket.StatusTryAgainLater {
+		t.Fatalf("close code %d", code)
+	}
+
+	hs := dial(t, url, http.Header{"Zotero-API-Key": {"KEY"}})
+	if code := hs.closeCode(); code != websocket.StatusTryAgainLater {
+		t.Fatalf("handshake key: close code %d", code)
+	}
+}
+
 func TestPublicTopicsAndForeignTopics(t *testing.T) {
 	_, _, url := setup(t)
 	c := dial(t, url, nil)
@@ -232,6 +258,29 @@ func TestAccessChanged(t *testing.T) {
 	}
 	h.Publish("/groups/6", 1)
 	c.expectEvent("topicUpdated")
+}
+
+// A key revoked outside this process (the CLI) never calls AccessChanged;
+// the periodic revalidation has to drop its topics.
+func TestRevalidateDropsRevokedKey(t *testing.T) {
+	h, r, url := setup(t)
+	c := dial(t, url, nil)
+	c.expectEvent("connected")
+	c.send(map[string]any{"apiKey": "KEY"})
+	c.expectEvent("subscriptionsCreated")
+
+	r.mu.Lock()
+	delete(r.keys, "KEY")
+	r.mu.Unlock()
+	h.Revalidate(context.Background())
+	removed := map[string]bool{}
+	for range 2 {
+		m := c.expectEvent("topicRemoved")
+		removed[m["topic"].(string)] = true
+	}
+	if !removed["/users/1"] || !removed["/groups/5"] {
+		t.Fatalf("removed %v", removed)
+	}
 }
 
 func TestBadMessagesClose(t *testing.T) {

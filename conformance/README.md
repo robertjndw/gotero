@@ -59,6 +59,23 @@ func TestZoteroCompat(t *testing.T) {
 
 `auth`, `groups`, `write`, `read`, `deleted`, `settings`, `tags`, `fulltext`, `files` (ZFS authorize, upload, register, download, 20 MiB streaming unless `-short`), `stream` (needs `StreamURL`), `sessions`, `quirks` (attachment field order, null md5/mtime, integer Retry-After, relation URIs).
 
+## Multi-client simulation
+
+`syncsim` runs several simulated Zotero clients against one library, concurrently and optionally over a lossy network, then checks that they converge and that nothing the server acknowledged went missing. Clients upload files with `If-Match` set to the md5 they last synced, as Zotero does, and every acknowledged upload must have replaced exactly that file, so a server that lets the last upload win fails even though its clients still converge. It uses the same `Provisioner`:
+
+```go
+rep, err := syncsim.Run(ctx, syncsim.Config{
+    BaseURL: "http://localhost:9000/api/", StreamURL: "ws://localhost:9000/stream",
+    Provisioner: myProvisioner{}, Users: 3, Devices: 2, Group: true,
+    Concurrent: true, Files: true, FaultRate: 0.1, Seed: 1,
+})
+// rep.Failures is empty when the server passed.
+```
+
+`syncsim.Test(t, cfg)` does the same inside a test and reports failures with their seed. Against gotero: `go test ./gotero -run TestSyncSim` with the variables above.
+
+Two hooks test operations. `Config.Restart` is called at random points to crash and restart the server, mid-request in concurrent runs; clients must recover. `Config.BeforeCheck` runs once everything has settled, and the checks then run against whatever server it leaves, such as one restored from a backup. Against a deployment, `TestSyncSimRestart` and `TestSyncSimBackupRestore` run a shell command for each (`GOTERO_SYNCSIM_RESTART_CMD`, `GOTERO_SYNCSIM_BACKUP_RESTORE_CMD`); `scripts/ops-test.sh` in the gotero repository shows both.
+
 ## Known deviations
 
 List tests in `Config.Skip` as `name` or `suite/name`, with a comment saying why:
