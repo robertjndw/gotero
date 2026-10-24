@@ -1,5 +1,9 @@
 go 1.26.0
 
+// CI installs this exact toolchain from setup-go. Keep it on the newest
+// patch release: govulncheck fails the build on known stdlib CVEs.
+toolchain go1.26.10
+
 use (
 	.
 	./conformance

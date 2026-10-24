@@ -227,6 +227,12 @@ type LibraryTx interface {
 	DeleteAttachmentFiles(ctx context.Context) ([]AttachmentFile, error)
 	AddStorageUsed(ctx context.Context, delta int64) error
 
+	// Same as the FileRepo methods, but on this transaction. Registering a
+	// file needs them under the lock, and going through the pool there
+	// would grab a second connection while holding the first.
+	UploadToken(ctx context.Context, uploadKey string) (UploadToken, error)
+	SetUploadTokenStateFrom(ctx context.Context, uploadKey, from, to string) (bool, error)
+
 	// RecordImported remembers what the importer wrote, replacing earlier
 	// records of the same keys.
 	RecordImported(ctx context.Context, t ObjectType, objs []ImportedObject) error

@@ -218,7 +218,12 @@ func (a *API) authorizeFile(c *gin.Context, l *LibraryContext, at attachment, fo
 		a.FailErr(c, err)
 		return
 	}
-	if err := a.checkQuota(c, l, l.Reader, f.size-cur.Size); err != nil {
+	q, err := a.ownerQuota(c, l)
+	if err != nil {
+		a.FailErr(c, err)
+		return
+	}
+	if err := q.check(c, l.Reader, f.size-cur.Size); err != nil {
 		a.FailErr(c, err)
 		return
 	}
@@ -301,6 +306,11 @@ func (a *API) knownBlobSize(ctx context.Context, l *LibraryContext, blobMD5 stri
 // just points at a blob that is already there.
 func (a *API) attachExisting(c *gin.Context, l *LibraryContext, key string, f fileForm, size int64) {
 	ctx := c.Request.Context()
+	q, err := a.ownerQuota(c, l)
+	if err != nil {
+		a.FailErr(c, err)
+		return
+	}
 	var before int64
 	v, err := a.store.InLibrary(ctx, l.LibraryID, func(tx repo.LibraryTx) error {
 		before = tx.Version()
@@ -317,7 +327,7 @@ func (a *API) attachExisting(c *gin.Context, l *LibraryContext, key string, f fi
 		}
 		// The authorize step looked at the size the client announced, and
 		// other uploads may have landed since. Charge the real blob size.
-		if err := a.checkQuota(c, l, tx, size-old.Size); err != nil {
+		if err := q.check(c, tx, size-old.Size); err != nil {
 			return err
 		}
 		return applyFile(ctx, tx, at, repo.AttachmentFile{
@@ -394,6 +404,11 @@ func tokenItemMD5(tok repo.UploadToken) string {
 // learns about them.
 func (a *API) registerFile(c *gin.Context, l *LibraryContext, key, uploadKey string) {
 	ctx := c.Request.Context()
+	q, err := a.ownerQuota(c, l)
+	if err != nil {
+		a.FailErr(c, err)
+		return
+	}
 	var before int64
 	v, err := a.store.InLibrary(ctx, l.LibraryID, func(tx repo.LibraryTx) error {
 		before = tx.Version()
@@ -407,7 +422,7 @@ func (a *API) registerFile(c *gin.Context, l *LibraryContext, key, uploadKey str
 		}
 		// Read under the library lock: of two concurrent registrations of
 		// one token, the second one sees "registered".
-		tok, terr := a.store.Files().GetUploadToken(ctx, uploadKey)
+		tok, terr := tx.UploadToken(ctx, uploadKey)
 		if terr != nil && !errors.Is(terr, repo.ErrNotFound) {
 			return terr
 		}
@@ -438,7 +453,7 @@ func (a *API) registerFile(c *gin.Context, l *LibraryContext, key, uploadKey str
 		itemMD5 := tokenItemMD5(tok)
 		// Parallel authorizations each passed the check against the same
 		// usage; registering is where the bytes actually get charged.
-		if err := a.checkQuota(c, l, tx, tok.Size-old.Size); err != nil {
+		if err := q.check(c, tx, tok.Size-old.Size); err != nil {
 			return err
 		}
 		if err := applyFile(ctx, tx, at, repo.AttachmentFile{
@@ -447,7 +462,7 @@ func (a *API) registerFile(c *gin.Context, l *LibraryContext, key, uploadKey str
 		}, itemMD5, old.Size); err != nil {
 			return err
 		}
-		moved, err := a.store.Files().SetUploadTokenStateFrom(ctx, uploadKey, "uploaded", "registered")
+		moved, err := tx.SetUploadTokenStateFrom(ctx, uploadKey, "uploaded", "registered")
 		if err != nil {
 			return err
 		}
@@ -606,17 +621,20 @@ func (a *API) removeStorageFiles(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
-// checkQuota rejects an upload that would push the library owner over quota.
-// delta is the change in stored bytes the upload causes. A group library is
-// charged to the group owner, together with everything else they own.
+// ownerQuota loads the owner's quota and how much they store outside l's
+// library. A group library is charged to the group owner, together with
+// everything else they own.
 //
-// cur is the reader for l's own library: the locked transaction when called
-// while registering a file, so its counter is exact. The owner's other
-// libraries are read without a lock, so two uploads into different libraries
-// of one owner can still both pass and overshoot the quota by up to one
-// file each. Closing that gap would mean locking every library of the owner
-// in a fixed order for each upload, which is not worth the contention.
-func (a *API) checkQuota(c *gin.Context, l *LibraryContext, cur repo.LibraryReader, delta int64) error {
+// Call it before InLibrary, never inside: the reads go through the pool,
+// and taking a second connection while holding the library lock deadlocks
+// once every connection belongs to a writer queued on that lock.
+//
+// The owner's other libraries are read without a lock, so two uploads into
+// different libraries of one owner can still both pass and overshoot the
+// quota by up to one file each. Closing that gap would mean locking every
+// library of the owner in a fixed order for each upload, which is not
+// worth the contention.
+func (a *API) ownerQuota(c *gin.Context, l *LibraryContext) (quota, error) {
 	ctx := c.Request.Context()
 	ownerID := l.Principal.User.ID
 	if l.Group != nil {
@@ -625,25 +643,40 @@ func (a *API) checkQuota(c *gin.Context, l *LibraryContext, cur repo.LibraryRead
 	// Not the cached principal: an admin changing a quota must apply at once.
 	owner, err := a.store.Users().Get(ctx, ownerID)
 	if err != nil {
-		return err
+		return quota{}, err
 	}
-	quota := owner.QuotaBytes
-	if quota == nil && a.defQuota != nil {
-		var err error
-		if quota, err = a.defQuota(ctx); err != nil {
-			return err
+	q := quota{limit: owner.QuotaBytes}
+	if q.limit == nil && a.defQuota != nil {
+		if q.limit, err = a.defQuota(ctx); err != nil {
+			return quota{}, err
 		}
 	}
-	if quota == nil {
+	if q.limit == nil {
+		return q, nil
+	}
+	q.others, err = files.OwnerUsage(ctx, a.store, owner, l.LibraryID)
+	return q, err
+}
+
+// quota is an owner's limit (nil for unlimited) and the bytes stored in
+// their libraries other than the one being written.
+type quota struct {
+	limit  *int64
+	others int64
+}
+
+// check rejects an upload that would push the owner over quota. cur is the
+// reader for the library being written: the locked transaction when
+// registering a file, so its counter is exact. delta is the change in
+// stored bytes the upload causes.
+func (q quota) check(c *gin.Context, cur repo.LibraryReader, delta int64) error {
+	if q.limit == nil {
 		return nil
 	}
-	usage, err := files.OwnerUsage(ctx, a.store, owner, cur)
-	if err != nil {
-		return err
-	}
-	if usage+delta > *quota {
+	usage := q.others + cur.StorageUsed()
+	if usage+delta > *q.limit {
 		c.Header("Zotero-Storage-Usage", strconv.FormatInt(files.QuotaMB(usage), 10))
-		c.Header("Zotero-Storage-Quota", strconv.FormatInt(files.QuotaMB(*quota), 10))
+		c.Header("Zotero-Storage-Quota", strconv.FormatInt(files.QuotaMB(*q.limit), 10))
 		return errStatus(http.StatusRequestEntityTooLarge, "File would exceed quota")
 	}
 	return nil

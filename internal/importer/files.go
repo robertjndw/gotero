@@ -342,7 +342,7 @@ func (r *run) reserve(ctx context.Context, size int64) error {
 		return err
 	}
 	if quota != nil {
-		used, err := files.OwnerUsage(ctx, r.w.Store, r.user, nil)
+		used, err := files.OwnerUsage(ctx, r.w.Store, r.user, 0)
 		if err != nil {
 			return err
 		}

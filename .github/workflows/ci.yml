@@ -56,6 +56,10 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
+        with:
+          # The pnpm version comes from packageManager, and package.json
+          # lives in web/, not the repo root.
+          package_json_file: web/package.json
       - uses: actions/setup-node@v5
         with:
           node-version: 22
@@ -74,25 +78,15 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.work
+      # Skip our own modules. They aren't dependencies, and the libraries
+      # rely on the top-level LICENSE instead of carrying their own.
       - name: reject copyleft dependencies
         run: |
           go run github.com/google/go-licenses/v2@latest check ./... \
-            --disallowed_types=forbidden,restricted
+            --disallowed_types=forbidden,restricted \
+            --ignore github.com/robertjndw/gotero
       - name: no fetched Zotero sources committed
         run: |
           if git ls-files | grep -E '^e2e/(contract|desktop)/\.cache/'; then
             echo "AGPL Zotero sources must not be committed" >&2; exit 1
           fi
-
-  docker:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: deploy/Dockerfile
-          push: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max

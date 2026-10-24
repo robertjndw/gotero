@@ -56,7 +56,9 @@ jobs:
 
       # Simulated Zotero clients editing and syncing concurrently, with lost
       # requests and responses, checked for convergence and lost writes.
+      # Only on one backend: the simulation exercises sync, not storage.
       - name: run multi-client sync simulation
+        if: matrix.storage == 'local'
         working-directory: conformance
         env:
           GOTERO_CONFORMANCE_URL: http://localhost:8080/api/

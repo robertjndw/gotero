@@ -54,7 +54,15 @@ func (r fileRepo) CreateUploadToken(ctx context.Context, t repo.UploadToken) err
 }
 
 func (r fileRepo) GetUploadToken(ctx context.Context, uploadKey string) (repo.UploadToken, error) {
-	rows, err := r.pool.Query(ctx, `SELECT `+uploadCols+` FROM upload_tokens WHERE upload_key = $1`, uploadKey)
+	return getUploadToken(ctx, r.pool, uploadKey)
+}
+
+func (r fileRepo) SetUploadTokenStateFrom(ctx context.Context, uploadKey, from, to string) (bool, error) {
+	return setUploadTokenStateFrom(ctx, r.pool, uploadKey, from, to)
+}
+
+func getUploadToken(ctx context.Context, q querier, uploadKey string) (repo.UploadToken, error) {
+	rows, err := q.Query(ctx, `SELECT `+uploadCols+` FROM upload_tokens WHERE upload_key = $1`, uploadKey)
 	if err != nil {
 		return repo.UploadToken{}, wrap("get upload token", err)
 	}
@@ -62,8 +70,8 @@ func (r fileRepo) GetUploadToken(ctx context.Context, uploadKey string) (repo.Up
 	return out, wrap("get upload token", err)
 }
 
-func (r fileRepo) SetUploadTokenStateFrom(ctx context.Context, uploadKey, from, to string) (bool, error) {
-	tag, err := r.pool.Exec(ctx,
+func setUploadTokenStateFrom(ctx context.Context, q querier, uploadKey, from, to string) (bool, error) {
+	tag, err := q.Exec(ctx,
 		`UPDATE upload_tokens SET state = $3 WHERE upload_key = $1 AND state = $2`, uploadKey, from, to)
 	if err != nil {
 		return false, wrap("set upload token state", err)

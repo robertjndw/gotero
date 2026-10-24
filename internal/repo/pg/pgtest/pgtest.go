@@ -94,7 +94,22 @@ func dsnFor(db string) string {
 // or when Docker is not available.
 func New(tb testing.TB) *pgxpool.Pool {
 	tb.Helper()
-	pool, err := pgxpool.New(context.Background(), NewDSN(tb))
+	return NewSized(tb, 0)
+}
+
+// NewSized is New with at most maxConns connections, 0 for the pgx default.
+// The default scales with the CPU count, so a test about pool exhaustion
+// has to pin it to behave the same on a laptop and a CI runner.
+func NewSized(tb testing.TB, maxConns int32) *pgxpool.Pool {
+	tb.Helper()
+	cfg, err := pgxpool.ParseConfig(NewDSN(tb))
+	if err != nil {
+		tb.Fatalf("parse test database dsn: %v", err)
+	}
+	if maxConns > 0 {
+		cfg.MaxConns = maxConns
+	}
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
 	if err != nil {
 		tb.Fatalf("connect test database: %v", err)
 	}

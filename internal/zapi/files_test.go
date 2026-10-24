@@ -207,7 +207,10 @@ func TestUploadStreamsWithBoundedHeap(t *testing.T) {
 }
 
 func TestConcurrentUploadsOfSameContent(t *testing.T) {
-	e := newEnv(t)
+	// Far fewer connections than uploads: a registration that reaches for
+	// a second connection while holding the library lock starves behind
+	// the writers queued on that lock and fails with 503.
+	e := newEnv(t, withMaxConns(2))
 	u := e.newUser(t, "alice", fullAccess)
 	l := e.userLib(t, u)
 	p := newPayload("same.pdf", bytes.Repeat([]byte("same bytes "), 50_000))

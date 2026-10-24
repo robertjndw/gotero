@@ -577,6 +577,14 @@ func (t *libTx) AddStorageUsed(ctx context.Context, delta int64) error {
 	return wrap("adjust storage used", err)
 }
 
+func (t *libTx) UploadToken(ctx context.Context, uploadKey string) (repo.UploadToken, error) {
+	return getUploadToken(ctx, t.q, uploadKey)
+}
+
+func (t *libTx) SetUploadTokenStateFrom(ctx context.Context, uploadKey, from, to string) (bool, error) {
+	return setUploadTokenStateFrom(ctx, t.q, uploadKey, from, to)
+}
+
 func (r *libReader) ImportedObjects(ctx context.Context, typ repo.ObjectType) (map[string]repo.ImportedObject, error) {
 	rows, err := r.q.Query(ctx,
 		`SELECT key, source_version, content_hash FROM import_objects WHERE library_id = $1 AND object_type = $2`,

@@ -203,10 +203,10 @@ func (s *Service) mac(payload string) string {
 const UploadTTL = 6 * time.Hour
 
 // OwnerUsage adds up the stored bytes a user is charged for: their own
-// library plus every group they own. cur, if non-nil, is used for its own
-// library instead of a fresh read, so a caller holding that library's lock
-// sees its exact counter.
-func OwnerUsage(ctx context.Context, store repo.Store, owner repo.User, cur repo.LibraryReader) (int64, error) {
+// library plus every group they own. Library except (0 for none) is
+// skipped, so a caller can add that one's counter itself once it holds
+// the lock.
+func OwnerUsage(ctx context.Context, store repo.Store, owner repo.User, except int64) (int64, error) {
 	ids := []int64{owner.LibraryID}
 	groups, err := store.Groups().ListForUser(ctx, owner.ID)
 	if err != nil {
@@ -219,8 +219,7 @@ func OwnerUsage(ctx context.Context, store repo.Store, owner repo.User, cur repo
 	}
 	var total int64
 	for _, id := range ids {
-		if cur != nil && id == cur.ID() {
-			total += cur.StorageUsed()
+		if id == except {
 			continue
 		}
 		r, err := store.Library(ctx, id)

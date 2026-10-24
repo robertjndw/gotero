@@ -56,14 +56,16 @@ type testEnv struct {
 }
 
 type envConfig struct {
-	deps   func(*zapi.Deps)
-	pgOpts []pg.Option
+	deps     func(*zapi.Deps)
+	pgOpts   []pg.Option
+	maxConns int32
 }
 
 type envOpt func(*envConfig)
 
 func withDeps(f func(*zapi.Deps)) envOpt { return func(c *envConfig) { c.deps = f } }
 func withPG(o ...pg.Option) envOpt       { return func(c *envConfig) { c.pgOpts = o } }
+func withMaxConns(n int32) envOpt        { return func(c *envConfig) { c.maxConns = n } }
 
 func newEnv(tb testing.TB, opts ...envOpt) *testEnv {
 	tb.Helper()
@@ -71,7 +73,7 @@ func newEnv(tb testing.TB, opts ...envOpt) *testEnv {
 	for _, o := range opts {
 		o(&cfg)
 	}
-	pool := pgtest.New(tb)
+	pool := pgtest.NewSized(tb, cfg.maxConns)
 	store := pg.New(pool, cfg.pgOpts...)
 	a := auth.NewAuthenticator(store.Keys(), store.Users())
 	pub := &recordingPublisher{}
