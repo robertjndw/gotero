@@ -39,9 +39,13 @@ const (
 func (a *API) RegisterSSO(r gin.IRouter) {
 	r.Use(a.noStore)
 
-	r.GET("/oidc/:provider/start", a.ssoHandle(func(c *gin.Context) error { return ssoStart[sso.OIDC](a, c) }))
+	oidcStart := a.ssoHandle(func(c *gin.Context) error { return ssoStart[sso.OIDC](a, c) })
+	samlStart := a.ssoHandle(func(c *gin.Context) error { return ssoStart[sso.SAML](a, c) })
+	r.GET("/oidc/:provider/start", oidcStart)
+	r.POST("/oidc/:provider/start", oidcStart)
 	r.GET("/oidc/:provider/callback", a.ssoHandle(a.oidcCallback))
-	r.GET("/saml/:provider/start", a.ssoHandle(func(c *gin.Context) error { return ssoStart[sso.SAML](a, c) }))
+	r.GET("/saml/:provider/start", samlStart)
+	r.POST("/saml/:provider/start", samlStart)
 	r.POST("/saml/:provider/acs", a.ssoHandle(a.samlACS))
 	r.GET("/saml/:provider/finish", a.ssoHandle(a.samlFinish))
 	r.GET("/saml/:provider/metadata", a.handle(a.samlMetadata))
@@ -171,18 +175,20 @@ func ssoStart[T sso.Provider](a *API, c *gin.Context) error {
 
 	st := repo.SSOState{Provider: p.Name(), ReturnTo: "/"}
 	var invite string
-	if c.Query("link") == "1" {
-		_, u, err := a.loadSession(c)
-		if err != nil {
-			if errors.Is(err, errUnauthenticated) {
-				c.Redirect(http.StatusSeeOther, "/login?error=sso_state")
-				return nil
-			}
+	if c.Request.Method == http.MethodPost {
+		u, ok, err := a.linkingUser(c)
+		if !ok {
 			return err
 		}
 		st.LinkUserID = &u.ID
 		st.ReturnTo = "/account"
 	} else {
+		if c.Query("link") != "" {
+			// Linking is POST only. Treating this as a plain login would
+			// switch the browser to whatever account the IdP hands back.
+			c.Redirect(http.StatusSeeOther, "/account?error=sso_state")
+			return nil
+		}
 		if invite = c.Query("invite"); invite != "" {
 			// Check now so a bad link fails before a round trip to the IdP.
 			_, valid, err := a.Accounts.LookupInvite(ctx, invite)
@@ -248,6 +254,34 @@ func ssoStart[T sso.Provider](a *API, c *gin.Context) error {
 	a.setSSOCookie(c, ssoInviteCookie, invite, inviteMaxAge)
 	c.Redirect(http.StatusFound, dest)
 	return nil
+}
+
+// linkingUser checks a POST to start, which links a provider to the
+// signed-in account. The session cookie is SameSite=Lax, so it is sent on
+// cross-site navigations too; without Origin and CSRF checks another site
+// could link its own IdP account to the victim's. The token comes as a form
+// field because the account page submits a plain form, not fetch.
+// If ok is false, a response has been written or err is set.
+func (a *API) linkingUser(c *gin.Context) (repo.User, bool, error) {
+	if a.checkOrigin(c); c.IsAborted() {
+		return repo.User{}, false, nil
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 4<<10)
+	sess, u, err := a.loadSession(c)
+	if err != nil {
+		if errors.Is(err, errUnauthenticated) {
+			c.Redirect(http.StatusSeeOther, "/login?error=sso_state")
+			return repo.User{}, false, nil
+		}
+		return repo.User{}, false, err
+	}
+	got := c.PostForm("csrf")
+	if got == "" || subtle.ConstantTimeCompare([]byte(got), []byte(sess.CSRFToken)) != 1 {
+		a.Log.WarnContext(c.Request.Context(), "sso link refused: bad csrf token", "user", u.ID)
+		c.Redirect(http.StatusSeeOther, "/account?error=sso_state")
+		return repo.User{}, false, nil
+	}
+	return u, true, nil
 }
 
 // takeState redeems the flow state named by the request. A nil result means
@@ -409,7 +443,7 @@ func ssoErrorCode(err error) string {
 }
 
 // completeSSO finishes a verified IdP login: either it connects the identity
-// to the signed-in user (link=1) or it signs the user in.
+// to the signed-in user (POST to start) or it signs the user in.
 func (a *API) completeSSO(c *gin.Context, p sso.Provider, st repo.SSOState, ident sso.Identity) error {
 	ctx := c.Request.Context()
 	ext := accounts.ExternalIdentity{Provider: p.Name(), Identity: ident}

@@ -122,7 +122,26 @@ func (c *client) cookie(name string) string {
 // oidcStart runs start and the IdP hop and returns the callback path.
 func (e *ssoEnv) oidcStart(t *testing.T, b *client, query string) (callback string) {
 	t.Helper()
-	h := b.get("/auth/oidc/corp/start" + query)
+	return e.oidcAuthorize(t, b.get("/auth/oidc/corp/start"+query))
+}
+
+// linkStart posts the account page's connect form the way a browser would.
+func (b *client) linkStart(csrf string) hop {
+	return b.rawDo("POST", "/auth/oidc/corp/start", url.Values{"csrf": {csrf}}, map[string]string{"Origin": b.origin})
+}
+
+func (e *ssoEnv) oidcLinkStart(t *testing.T, b *client) (callback string) {
+	t.Helper()
+	return e.oidcAuthorize(t, b.linkStart(b.csrf))
+}
+
+func (e *ssoEnv) oidcLink(t *testing.T, b *client) hop {
+	t.Helper()
+	return b.get(e.oidcLinkStart(t, b))
+}
+
+func (e *ssoEnv) oidcAuthorize(t *testing.T, h hop) (callback string) {
+	t.Helper()
 	require.Equal(t, http.StatusFound, h.status, h.body)
 	require.Equal(t, "no-store", h.header.Get("Cache-Control"))
 	code, state := e.oidc.Authorize(t, h.location())
@@ -378,7 +397,7 @@ func TestSSOLinkAsLoggedInAdmin(t *testing.T) {
 	require.Equal(t, 200, res.status, string(res.raw))
 
 	e.oidc.SetClaims(map[string]any{"sub": "root-sub", "email": "root@corp.example", "email_verified": true, "preferred_username": "root"})
-	h := e.oidcLogin(t, b, "?link=1")
+	h := e.oidcLink(t, b)
 	assert.Equal(t, "/account", h.location())
 	me := b.mustOK("GET", "/me", nil)
 	assert.Equal(t, "root", me["username"], "the session is kept")
@@ -395,11 +414,11 @@ func TestSSOLinkAsLoggedInAdmin(t *testing.T) {
 func TestSSOLinkNeedsSession(t *testing.T) {
 	e := newSSOEnv(t, nil)
 	b := e.browser()
-	assert.Equal(t, "/login?error=sso_state", b.get("/auth/oidc/corp/start?link=1").location())
+	assert.Equal(t, "/login?error=sso_state", b.linkStart("whatever").location())
 
 	t.Run("session switched mid flow", func(t *testing.T) {
 		b := e.adminBrowser()
-		cb := e.oidcStart(t, b, "?link=1")
+		cb := e.oidcLinkStart(t, b)
 		res := b.do("POST", "/logout", nil)
 		require.Equal(t, 204, res.status)
 		h := b.get(cb)
@@ -413,9 +432,36 @@ func TestSSOLinkNeedsSession(t *testing.T) {
 		require.Equal(t, "/", e.oidcLogin(t, other, "").location())
 
 		b := e.adminBrowser()
-		h := e.oidcLogin(t, b, "?link=1")
+		h := e.oidcLink(t, b)
 		assert.Equal(t, "/account?error=identity_in_use", h.location())
 	})
+}
+
+// Linking must not be startable by a cross-site navigation or form post,
+// since that would attach an attacker's IdP account to the victim's account.
+func TestSSOLinkNeedsCSRF(t *testing.T) {
+	e := newSSOEnv(t, nil)
+	b := e.adminBrowser()
+	require.NotEmpty(t, b.csrf)
+
+	t.Run("get", func(t *testing.T) {
+		h := b.get("/auth/oidc/corp/start?link=1")
+		assert.Equal(t, http.StatusSeeOther, h.status)
+		assert.Equal(t, "/account?error=sso_state", h.location())
+	})
+	t.Run("missing token", func(t *testing.T) {
+		assert.Equal(t, "/account?error=sso_state", b.linkStart("").location())
+	})
+	t.Run("wrong token", func(t *testing.T) {
+		assert.Equal(t, "/account?error=sso_state", b.linkStart("not-the-token").location())
+	})
+	t.Run("foreign origin", func(t *testing.T) {
+		h := b.rawDo("POST", "/auth/oidc/corp/start", url.Values{"csrf": {b.csrf}}, map[string]string{"Origin": "https://evil.example"})
+		assert.Equal(t, http.StatusForbidden, h.status)
+		assert.Empty(t, h.location())
+	})
+	me := b.mustOK("GET", "/me", nil)
+	assert.Empty(t, me["providers"])
 }
 
 func (e *env) adminBrowser() *client {

@@ -1,13 +1,13 @@
 package adminapi
 
 import (
+	"errors"
 	"net/http"
 	"net/url"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/robertjndw/gotero/internal/accounts"
-	"github.com/robertjndw/gotero/internal/auth"
 	"github.com/robertjndw/gotero/internal/httpx"
 	"github.com/robertjndw/gotero/internal/repo"
 )
@@ -114,10 +114,23 @@ func (a *API) changePassword(c *gin.Context) error {
 		return accounts.ErrLocalLoginDisabled
 	}
 	// SSO-only accounts have no password to confirm; they are already
-	// authenticated by their session.
+	// authenticated by their session. Everyone else goes through the login
+	// guard: a stolen session must not become an unthrottled password oracle,
+	// and argon2 checks here count against the same concurrency cap.
 	if u.PasswordHash != "" {
-		if ok, err := auth.VerifyPassword(u.PasswordHash, in.CurrentPassword); err != nil || !ok {
+		_, err := a.Accounts.Login(ctx, u.Username, in.CurrentPassword, httpx.ClientIP(ctx))
+		var limited *accounts.RateLimitedError
+		switch {
+		case errors.As(err, &limited):
+			return &apiError{
+				Status: http.StatusTooManyRequests, Code: "rate_limited",
+				Message: "Too many failed attempts. Try again later.",
+				Header:  map[string]string{"Retry-After": httpx.RetryAfter(limited.RetryAfter)},
+			}
+		case errors.Is(err, accounts.ErrBadCredentials):
 			return fieldError("currentPassword", "Current password is incorrect.")
+		case err != nil:
+			return err
 		}
 	}
 	if err := accounts.ValidatePassword(in.NewPassword); err != nil {

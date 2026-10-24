@@ -105,15 +105,15 @@ describe('account sign-in methods', () => {
   it('lists identities and offers to connect providers that are not linked', async () => {
     renderApp('/account', { loginAs: 2 })
     await screen.findByText('Sign-in methods')
-    await screen.findByRole('link', { name: 'Connect Corp SAML' })
-    const scope = screen
-    expect(scope.getByText('Keycloak')).toBeInTheDocument()
-    expect(scope.getByText(/alice@example\.org/)).toBeInTheDocument()
-    expect(scope.getByRole('link', { name: 'Connect Corp SAML' })).toHaveAttribute(
-      'href',
-      '/auth/saml/corp-saml/start?link=1',
-    )
-    expect(scope.queryByRole('link', { name: 'Connect Keycloak' })).not.toBeInTheDocument()
+    const connect = await screen.findByRole('button', { name: 'Connect Corp SAML' })
+    expect(screen.getByText('Keycloak')).toBeInTheDocument()
+    expect(screen.getByText(/alice@example\.org/)).toBeInTheDocument()
+    // Linking is a form POST carrying the CSRF token, never a plain link.
+    const form = connect.closest('form')!
+    expect(form).toHaveAttribute('method', 'post')
+    expect(form).toHaveAttribute('action', '/auth/saml/corp-saml/start')
+    expect(form.querySelector('input[name="csrf"]')).toHaveValue(db.csrf)
+    expect(screen.queryByRole('button', { name: 'Connect Keycloak' })).not.toBeInTheDocument()
   })
 
   it('unlinks an identity after confirmation', async () => {
@@ -122,7 +122,7 @@ describe('account sign-in methods', () => {
     await user.click(await screen.findByRole('button', { name: /Unlink/ }))
     const confirm = await screen.findByRole('alertdialog')
     await user.click(within(confirm).getByRole('button', { name: 'Unlink' }))
-    expect(await screen.findByRole('link', { name: 'Connect Keycloak' })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: 'Connect Keycloak' })).toBeInTheDocument()
     expect(db.identities[2]).toHaveLength(0)
   })
 

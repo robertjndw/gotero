@@ -54,11 +54,20 @@ func (r *rateLimiter) allow(key string, now time.Time) (bool, time.Duration) {
 		r.hits[key] = recent
 		return false, recent[0].Add(r.window).Sub(now)
 	}
-	if len(r.hits) >= maxLimiterKeys {
+	if _, known := r.hits[key]; !known && len(r.hits) >= maxLimiterKeys {
 		for k, ts := range r.hits {
 			if len(ts) == 0 || !ts[len(ts)-1].After(cutoff) {
 				delete(r.hits, k)
 			}
+		}
+		// A spray from many sources can keep every entry live. Dropping a
+		// random one only refunds that source's budget, while refusing new
+		// keys would lock out everyone else.
+		for k := range r.hits {
+			if len(r.hits) < maxLimiterKeys {
+				break
+			}
+			delete(r.hits, k)
 		}
 	}
 	r.hits[key] = append(recent, now)
@@ -95,7 +104,7 @@ func clientName(ua string) string {
 
 func (a *API) createSession(c *gin.Context) {
 	ctx := c.Request.Context()
-	if ok, wait := a.sessionLimit.allow(httpx.ClientIP(ctx), a.now()); !ok {
+	if ok, wait := a.sessionLimit.allow(auth.SourceKey(httpx.ClientIP(ctx)), a.now()); !ok {
 		c.Header("Retry-After", httpx.RetryAfter(wait))
 		Fail(c, http.StatusTooManyRequests, "Too many login sessions requested")
 		return

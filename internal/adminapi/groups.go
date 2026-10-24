@@ -42,6 +42,15 @@ func toMemberDTO(m repo.GroupMember) memberDTO {
 }
 
 func (a *API) toGroupDTO(ctx context.Context, g repo.Group, owners map[int64]string) (groupDTO, error) {
+	members, err := a.Store.Groups().Members(ctx, g.ID)
+	if err != nil {
+		return groupDTO{}, err
+	}
+	return a.groupDTOWith(ctx, g, owners, members)
+}
+
+// groupDTOWith is toGroupDTO for callers that already loaded the members.
+func (a *API) groupDTOWith(ctx context.Context, g repo.Group, owners map[int64]string, members []repo.GroupMember) (groupDTO, error) {
 	name, ok := owners[g.OwnerID]
 	if !ok {
 		u, err := a.Store.Users().Get(ctx, g.OwnerID)
@@ -50,10 +59,6 @@ func (a *API) toGroupDTO(ctx context.Context, g repo.Group, owners map[int64]str
 		}
 		name = u.Username
 		owners[g.OwnerID] = name
-	}
-	members, err := a.Store.Groups().Members(ctx, g.ID)
-	if err != nil {
-		return groupDTO{}, err
 	}
 	lib, err := a.Store.Library(ctx, g.LibraryID)
 	if err != nil {
@@ -171,11 +176,11 @@ func (a *API) myGroups(c *gin.Context) error {
 	}
 	items := make([]myGroup, 0, len(gs))
 	for _, g := range gs {
-		d, err := a.toGroupDTO(ctx, g, owners)
+		members, err := a.Store.Groups().Members(ctx, g.ID)
 		if err != nil {
 			return err
 		}
-		members, err := a.Store.Groups().Members(ctx, g.ID)
+		d, err := a.groupDTOWith(ctx, g, owners, members)
 		if err != nil {
 			return err
 		}
@@ -266,7 +271,7 @@ func (a *API) getGroup(c *gin.Context) error {
 	if err != nil {
 		return err
 	}
-	d, err := a.toGroupDTO(c.Request.Context(), gc.group, map[int64]string{})
+	d, err := a.groupDTOWith(c.Request.Context(), gc.group, map[int64]string{}, gc.members)
 	if err != nil {
 		return err
 	}

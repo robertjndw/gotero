@@ -178,4 +178,40 @@ func TestIdleBodyKeepsProgressingUploadsAlive(t *testing.T) {
 	}
 }
 
+// A body deadline still set after the body is read makes net/http's
+// background read time out and cancel the request context.
+func TestBodyDeadlinesDoNotCancelLongRequests(t *testing.T) {
+	h := BodyDeadlines(100*time.Millisecond, 100*time.Millisecond)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		time.Sleep(300 * time.Millisecond)
+		if r.Context().Err() != nil {
+			http.Error(w, "cancelled", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	srv := httptest.NewServer(Log(discardLogger())(h))
+	defer srv.Close()
+
+	for _, tc := range []struct{ method, path, body string }{
+		{http.MethodGet, "/files/download/t", ""},
+		{http.MethodPost, "/api/users/1/items", "[]"},
+		{http.MethodPost, "/files/upload/k", "abc"},
+	} {
+		var body io.Reader
+		if tc.body != "" {
+			body = strings.NewReader(tc.body)
+		}
+		req, _ := http.NewRequest(tc.method, srv.URL+tc.path, body)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("%s %s: request context was cancelled (%d)", tc.method, tc.path, resp.StatusCode)
+		}
+	}
+}
+
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }

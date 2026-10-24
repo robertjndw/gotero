@@ -28,9 +28,10 @@ type guardKey struct {
 	limit int
 }
 
-// guardKeys names the counters one attempt draws from.
-func guardKeys(username, ip string) []guardKey {
-	src, wide := ip, ""
+// sources returns the per-host source of ip (an IPv4 address or IPv6 /64)
+// and, for IPv6, the wider /48 site prefix.
+func sources(ip string) (src, wide string) {
+	src = ip
 	if a, err := netip.ParseAddr(ip); err == nil {
 		a = a.Unmap().WithZone("")
 		src = a.String()
@@ -39,6 +40,20 @@ func guardKeys(username, ip string) []guardKey {
 			wide = netip.PrefixFrom(a, 48).Masked().String()
 		}
 	}
+	return src, wide
+}
+
+// SourceKey is the rate limit bucket for a client address: the address
+// itself for IPv4, its /64 for IPv6, since one host can rotate through a
+// whole /64 at will.
+func SourceKey(ip string) string {
+	src, _ := sources(ip)
+	return src
+}
+
+// guardKeys names the counters one attempt draws from.
+func guardKeys(username, ip string) []guardKey {
+	src, wide := sources(ip)
 	keys := []guardKey{{"u:" + username + "\x00" + src, maxPairAttempts}, {"ip:" + src, maxIPAttempts}}
 	if wide != "" {
 		keys = append(keys, guardKey{"net:" + wide, maxNetAttempts})

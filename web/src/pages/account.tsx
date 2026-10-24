@@ -59,7 +59,8 @@ import {
   ListSkeleton,
   PageHeader,
 } from '@/components/common'
-import { SsoErrorAlert, ssoHref } from '@/components/sso'
+import { SsoErrorAlert } from '@/components/sso'
+import { getCsrfToken } from '@/lib/api'
 
 const profileSchema = z.object({
   displayName: z.string().min(1, 'Enter a display name'),
@@ -266,9 +267,14 @@ function IdentitiesCard() {
         {connectable.length > 0 && (
           <div className="flex flex-wrap gap-2">
             {connectable.map((p) => (
-              <Button key={p.id} asChild variant="outline" size="sm">
-                <a href={ssoHref(p, { link: '1' })}>Connect {p.displayName}</a>
-              </Button>
+              // Form POST instead of a link: the server wants the CSRF token
+              // before it starts linking.
+              <form key={p.id} method="post" action={p.startUrl}>
+                <input type="hidden" name="csrf" value={getCsrfToken() ?? ''} />
+                <Button type="submit" variant="outline" size="sm">
+                  Connect {p.displayName}
+                </Button>
+              </form>
             ))}
           </div>
         )}

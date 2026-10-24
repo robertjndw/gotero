@@ -148,18 +148,21 @@ SSO endpoints live under `/auth` because their URLs are registered at the identi
 |---|---|---|
 | GET | `/auth/oidc/{provider}/start` | Redirects to the IdP. |
 | GET | `/auth/oidc/{provider}/callback` | Redirect URI to register at the IdP. |
+| POST | `/auth/oidc/{provider}/start` | Connects the provider to the logged-in account, then redirects to the IdP. |
 | GET | `/auth/saml/{provider}/start` | Redirects to the IdP (HTTP-Redirect binding). |
+| POST | `/auth/saml/{provider}/start` | Same as the OIDC POST. |
 | POST | `/auth/saml/{provider}/acs` | Assertion consumer service (HTTP-POST binding). |
 | GET | `/auth/saml/{provider}/finish` | Internal second hop after the ACS. |
 | GET | `/auth/saml/{provider}/metadata` | SP metadata XML for the IdP. |
 
-`start` accepts these query parameters:
+`GET start` accepts these query parameters:
 - `invite=TOKEN`: sign up through an invite. The invite's email, if any, must match the IdP's verified email.
 - `session=TOKEN`: a Zotero client login session; on success the browser lands on `/login?session=TOKEN` to approve it.
 - `redirect=/path`: a same-origin path to land on after login. Anything not starting with a single `/` is ignored.
-- `link=1`: connect the provider to the account that is currently logged in. Needs a session; lands on `/account`.
 
-On failure the browser is redirected to `/login?error=CODE` (`/register?invite=TOKEN&error=CODE` for invite signups, `/account?error=CODE` for `link=1`). Details are only logged server-side. Codes:
+`POST start` connects the provider to the account that is currently logged in and lands on `/account`. It is a plain HTML form submission (`application/x-www-form-urlencoded`) that must come from this origin and carry the session's CSRF token in a `csrf` field. It cannot be a GET because the session cookie is `SameSite=Lax`, so a cross-site link would carry it. A `GET start` with `link` set is refused with `sso_state`.
+
+On failure the browser is redirected to `/login?error=CODE` (`/register?invite=TOKEN&error=CODE` for invite signups, `/account?error=CODE` for `POST start`). Details are only logged server-side. Codes:
 
 | Code | Meaning |
 |---|---|
@@ -173,4 +176,4 @@ On failure the browser is redirected to `/login?error=CODE` (`/register?invite=T
 | `link_required` | An account with this email already exists; sign in to it and connect the provider from the account page. |
 | `identity_in_use` | That IdP account is already linked to another user, or this user already has one for the provider. |
 
-SSO never grants or removes instance admin rights. New accounts created through SSO are regular users unless they come from an admin invite, and email-based linking never attaches an IdP identity to an existing admin; admins connect providers explicitly with `link=1`.
+SSO never grants or removes instance admin rights. New accounts created through SSO are regular users unless they come from an admin invite, and email-based linking never attaches an IdP identity to an existing admin; admins connect providers explicitly with `POST start`.
