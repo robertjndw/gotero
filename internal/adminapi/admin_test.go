@@ -1,7 +1,9 @@
 package adminapi_test
 
 import (
+	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 	"testing"
@@ -11,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/robertjndw/gotero/internal/accounts"
+	"github.com/robertjndw/gotero/internal/jobs"
 	"github.com/robertjndw/gotero/internal/repo"
 )
 
@@ -353,8 +356,30 @@ func TestStatsAndGC(t *testing.T) {
 	assert.Contains(t, storage, "blobCount")
 
 	res := adm.mustOK("POST", "/admin/gc", map[string]any{"dryRun": true})
-	assert.Equal(t, map[string]any{"orphanBlobs": float64(3), "orphanBytes": float64(99), "deleted": false}, res)
+	assert.Equal(t, map[string]any{"orphanBlobs": float64(3), "orphanBytes": float64(99), "deleted": false, "failed": float64(0)}, res)
 	res = adm.mustOK("POST", "/admin/gc", map[string]any{"dryRun": false})
 	assert.Equal(t, true, res["deleted"])
 	assert.Equal(t, []bool{true, false}, e.gc.dry)
+}
+
+func TestGCReportsPartialFailure(t *testing.T) {
+	e := newEnv(t)
+	adm := e.adminClient()
+
+	// A few blobs that could not be removed must not hide the rest of the sweep.
+	e.gc.failed, e.gc.err = 2, fmt.Errorf("%w: 2 failed", jobs.ErrBlobsNotRemoved)
+	res := adm.mustOK("POST", "/admin/gc", map[string]any{"dryRun": false})
+	assert.Equal(t, float64(3), res["orphanBlobs"])
+	assert.Equal(t, float64(2), res["failed"])
+
+	// A failure that is not about individual blobs is still an error.
+	e.gc.failed, e.gc.err = 0, errors.New("sweep staging: backend down")
+	r := adm.do("POST", "/admin/gc", map[string]any{"dryRun": false})
+	assert.Equal(t, http.StatusInternalServerError, r.status)
+
+	// Blob failures alongside a real error must not turn it into a 200.
+	e.gc.failed, e.gc.err = 2, errors.Join(errors.New("sweep staging: backend down"),
+		fmt.Errorf("%w: 2 failed", jobs.ErrBlobsNotRemoved))
+	r = adm.do("POST", "/admin/gc", map[string]any{"dryRun": false})
+	assert.Equal(t, http.StatusInternalServerError, r.status)
 }

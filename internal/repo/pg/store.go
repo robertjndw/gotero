@@ -162,6 +162,8 @@ func conflictFor(constraint string) error {
 		return repo.ErrEmailTaken
 	case "user_identities_provider_subject_key":
 		return repo.ErrIdentityLinked
+	case "import_jobs_one_active_idx":
+		return repo.ErrImportActive
 	}
 	return repo.ErrConflict
 }

@@ -1,6 +1,7 @@
 import path from 'node:path'
 import fs from 'node:fs'
 import { defineConfig, loadEnv, type Plugin } from 'vite'
+import { configDefaults } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
@@ -47,6 +48,8 @@ export default defineConfig(({ mode }) => {
       globals: true,
       environment: 'jsdom',
       setupFiles: ['./src/test/setup.ts'],
+      // e2e/ holds Playwright specs that need a running server; `pnpm test:e2e` runs those.
+      exclude: [...configDefaults.exclude, 'e2e/**'],
       css: false,
     },
   }

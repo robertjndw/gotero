@@ -76,11 +76,21 @@ func (n *notifier) LoginCompleted(t string) {
 	n.mu.Unlock()
 }
 
-type fakeGC struct{ dry []bool }
+type fakeGC struct {
+	dry []bool
+	// failed and err, when set, are what the next real (non-dry) run reports.
+	failed int64
+	err    error
+}
 
 func (g *fakeGC) GC(_ context.Context, dryRun bool) (jobs.GCResult, error) {
 	g.dry = append(g.dry, dryRun)
-	return jobs.GCResult{OrphanBlobs: 3, OrphanBytes: 99, Deleted: !dryRun}, nil
+	res := jobs.GCResult{OrphanBlobs: 3, OrphanBytes: 99, Deleted: !dryRun}
+	if dryRun {
+		return res, nil
+	}
+	res.Failed = g.failed
+	return res, g.err
 }
 
 type env struct {

@@ -44,6 +44,12 @@ func TestDeadlineWriterExtendsAtMostOncePerSecond(t *testing.T) {
 	if got := time.Until(rec.deadlines[1]); got < 50*time.Second || got > time.Minute {
 		t.Fatalf("deadline should be about one idle period ahead, got %v", got)
 	}
+	// The throttle restarts from the extension, not from when the writer
+	// was created.
+	_, _ = dw.Write([]byte("x"))
+	if len(rec.deadlines) != 2 {
+		t.Fatalf("a write right after an extension must not extend again, got %d calls", len(rec.deadlines))
+	}
 
 	dw.Release()
 	if last := rec.deadlines[len(rec.deadlines)-1]; !last.IsZero() {
@@ -215,3 +221,61 @@ func TestBodyDeadlinesDoNotCancelLongRequests(t *testing.T) {
 }
 
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+// net/http starts its background read right away for requests without a
+// body. A read deadline on such a request is never cleared (there is no EOF
+// to clear it), so it would cancel the context of any handler that runs
+// longer than the deadline, such as a large download.
+func TestBodyDeadlinesLeaveBodilessRequestsAlone(t *testing.T) {
+	h := BodyDeadlines(100*time.Millisecond, 100*time.Millisecond)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+		if r.Context().Err() != nil {
+			http.Error(w, "cancelled", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/api/users/1/items")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET without a body was cancelled (%d)", resp.StatusCode)
+	}
+}
+
+// Ordinary bodies get one deadline for the whole body; reads that make
+// progress must not move it, and in particular must not collapse it.
+func TestWholeBodyDeadlineSurvivesChunkedBodies(t *testing.T) {
+	h := BodyDeadlines(2*time.Second, 0)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		if err != nil || string(b) != "abcdef" {
+			http.Error(w, "bad", http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	pr, pw := io.Pipe()
+	go func() {
+		for _, s := range []string{"ab", "cd", "ef"} {
+			time.Sleep(50 * time.Millisecond)
+			_, _ = pw.Write([]byte(s))
+		}
+		_ = pw.Close()
+	}()
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/users/1/items", pr)
+	req.ContentLength = 6
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("body delivered well within the deadline was cut off: %d", resp.StatusCode)
+	}
+}

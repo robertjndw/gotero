@@ -57,7 +57,7 @@ function StartCard() {
           >
             zotero.org/settings/keys <ExternalLink className="size-3" />
           </a>
-          , allowing library and file access, then paste it below. The key is only used for this
+          , allowing library, notes and file access, then paste it below. The key is only used for this
           import and is not stored.
         </CardDescription>
       </CardHeader>

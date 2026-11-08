@@ -22,6 +22,7 @@ var (
 	ErrEmailTaken        = fmt.Errorf("%w: email taken", ErrConflict)
 	ErrIdentityLinked    = fmt.Errorf("%w: identity already linked", ErrConflict)
 	ErrInviteUnavailable = fmt.Errorf("%w: invite unknown, used or expired", ErrConflict)
+	ErrImportActive      = fmt.Errorf("%w: an import is already queued or running", ErrConflict)
 	// ErrBusy means a lock could not be acquired in time. The server maps it
 	// to 503 with Retry-After so clients back off instead of piling up.
 	ErrBusy = errors.New("repo: busy")
@@ -549,7 +550,27 @@ type FileRepo interface {
 	// the same rules as OrphanBlobs, checked atomically. It reports whether
 	// the row was removed; only then may the caller delete the bytes.
 	DeleteOrphanBlob(ctx context.Context, md5 string, olderThan time.Time) (bool, error)
+	// UntrackedBlobs returns those of md5s that have no blobs row and no
+	// live upload token: bytes in storage that nothing records. Only a hint
+	// for garbage collection; BlobTx.Untracked decides under the lock.
+	UntrackedBlobs(ctx context.Context, md5s []string) ([]string, error)
+	// LockBlob runs fn in a transaction holding a cross-process lock on md5
+	// and commits if fn returns nil. It pins a pool connection until fn
+	// returns, so fn must do only bounded work and must not use the pool.
+	LockBlob(ctx context.Context, md5 string, fn func(tx BlobTx) error) error
 	Stats(ctx context.Context) (FileStats, error)
+}
+
+// BlobTx is a transaction holding the lock on one blob.
+type BlobTx interface {
+	// Put records the locked blob with the given size, like PutBlob.
+	Put(ctx context.Context, size int64) error
+	// DeleteIfOrphan is DeleteOrphanBlob for the locked blob. The delete
+	// only becomes visible to others when the transaction commits.
+	DeleteIfOrphan(ctx context.Context, olderThan time.Time) (bool, error)
+	// Untracked reports whether the locked blob has no row and no live
+	// upload token, so its bytes, if any, belong to nobody.
+	Untracked(ctx context.Context) (bool, error)
 }
 
 type FileStats struct {
@@ -573,27 +594,53 @@ type ImportJob struct {
 	CreatedAt     time.Time
 	StartedAt     *time.Time
 	FinishedAt    *time.Time
+	// ClaimedBy is the token of the worker holding a running job, and
+	// LeaseExpiresAt when that worker loses it unless it renews in time.
+	ClaimedBy      string
+	LeaseExpiresAt *time.Time
 }
 
+// ImportRepo is the queue of zotero.org imports. A worker that claims a job
+// gets a lease under a token of its own choosing. Every write it makes to the
+// job names that token, so once the lease expired and another worker took
+// the job over, the first one's writes are refused and it has to stop.
 type ImportRepo interface {
+	// Create queues a job. A user has at most one queued or running job;
+	// a second one fails with ErrImportActive.
 	Create(ctx context.Context, j ImportJob) (ImportJob, error)
 	Get(ctx context.Context, id int64) (ImportJob, error)
 	ListByUser(ctx context.Context, userID int64) ([]ImportJob, error)
-	// ClaimNext atomically moves the oldest queued job to running.
-	ClaimNext(ctx context.Context) (ImportJob, error)
+	// ActiveForUser returns the user's queued or running job, or ErrNotFound.
+	ActiveForUser(ctx context.Context, userID int64) (ImportJob, error)
+	// ClaimNext atomically moves the oldest queued job to running, leased to
+	// owner for the given duration.
+	ClaimNext(ctx context.Context, owner string, lease time.Duration) (ImportJob, error)
+	// Claim does the same for one job. ErrNotFound means it is not queued.
+	Claim(ctx context.Context, id int64, owner string, lease time.Duration) (ImportJob, error)
+	// Renew extends the lease. It reports false once owner no longer holds
+	// the running job.
+	Renew(ctx context.Context, id int64, owner string, lease time.Duration) (bool, error)
+	// Update overwrites a job unconditionally. Workers and the API use the
+	// conditional methods instead.
 	Update(ctx context.Context, j ImportJob) error
 
 	// SaveProgress stores cursor and progress of a running job. It reports
-	// false when the job is no longer running (cancelled meanwhile), so a
-	// worker never overwrites the status the user set.
-	SaveProgress(ctx context.Context, id int64, cursor, progress json.RawMessage) (bool, error)
+	// false when owner does not hold the running job anymore (cancelled, or
+	// the lease went to another worker), so a worker never overwrites the
+	// status the user set or another worker's progress.
+	SaveProgress(ctx context.Context, id int64, owner string, cursor, progress json.RawMessage) (bool, error)
 	// Finish ends a running job with status completed or failed, wipes the
-	// source key and sets finished_at. It reports false if the job was not
-	// running anymore.
-	Finish(ctx context.Context, id int64, status, errMsg string, at time.Time) (bool, error)
-	// Requeue puts a running job back in the queue, keeping its cursor.
-	Requeue(ctx context.Context, id int64) error
-	// RequeueRunning does the same for every running job. A worker calls it
-	// on startup, when jobs left running by a crashed process are orphans.
-	RequeueRunning(ctx context.Context) (int64, error)
+	// source key and sets finished_at. It reports false if owner did not hold
+	// the running job anymore.
+	Finish(ctx context.Context, id int64, owner, status, errMsg string, at time.Time) (bool, error)
+	// Requeue puts a running job that owner holds back in the queue, keeping
+	// its cursor.
+	Requeue(ctx context.Context, id int64, owner string) error
+	// RequeueExpired puts every running job whose lease ran out back in the
+	// queue: its worker crashed, was killed or hangs.
+	RequeueExpired(ctx context.Context) (int64, error)
+	// Cancel cancels a job that is still queued or running and wipes its
+	// source key. It reports false, changing nothing, when the job had
+	// already ended.
+	Cancel(ctx context.Context, id int64, at time.Time) (bool, error)
 }

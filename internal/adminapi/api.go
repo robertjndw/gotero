@@ -50,6 +50,9 @@ type ImportKeyCheck struct {
 	Valid bool
 	// Library is whether the key may read the user's library.
 	Library bool
+	// Notes is whether the key may read notes. Without it zotero.org leaves
+	// them out of every answer.
+	Notes bool
 	// Files is whether the key may download attachment files.
 	Files bool
 }

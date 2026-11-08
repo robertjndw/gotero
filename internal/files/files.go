@@ -13,10 +13,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
+	"syscall"
 	"time"
 
 	"github.com/robertjndw/gotero/internal/repo"
@@ -43,43 +44,161 @@ func BlobKey(md5hex string) string {
 }
 
 // Service stores and serves attachment blobs.
+//
+// A blobs row must never outlive its bytes: uploads skip sending content
+// that already has a row, and attachments are registered against rows. GC
+// and uploads of the same md5 can run in different processes (the import
+// CLI, or two servers during an upgrade), so they serialize on a database
+// lock (repo.FileRepo.LockBlob) rather than a mutex.
 type Service struct {
 	backend storage.Backend
 	files   repo.FileRepo
 	secret  []byte
 	now     func() time.Time
-
-	// locks serialize committing a blob against garbage collecting the same
-	// md5. Without it GC could delete bytes right after a re-upload of the
-	// same content committed (Commit is a no-op when the key still exists).
-	// Striped by md5 so unrelated uploads never wait on each other.
-	locks [64]sync.Mutex
 }
 
-func (s *Service) lock(md5hex string) *sync.Mutex {
-	b, _ := hex.DecodeString(md5hex[:2])
-	return &s.locks[int(b[0])%len(s.locks)]
+// ErrBlobCollected means garbage collection removed the bytes of a blob
+// between an upload committing them and recording the row. The upload is
+// fine to repeat, so it is reported as busy and clients retry.
+var ErrBlobCollected = fmt.Errorf("files: blob was garbage collected during upload: %w", repo.ErrBusy)
+
+// ErrStorageFull means the blob store has no room left (ENOSPC, or EDQUOT
+// for a filesystem quota). Unlike other storage errors it will not go away
+// on retry, so it is reported separately and an operator has to act.
+var ErrStorageFull = errors.New("files: blob storage is full")
+
+// storageErr tags errors that mean the store is out of space. Only the local
+// backend reports them as errnos; S3 and WebDAV surface plain HTTP errors.
+func storageErr(op string, err error) error {
+	if errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EDQUOT) {
+		return fmt.Errorf("files: %s: %w: %w", op, ErrStorageFull, err)
+	}
+	return fmt.Errorf("files: %s: %w", op, err)
 }
 
-// RemoveOrphan deletes a blob if, and only if, it is still an orphan. The
-// row goes first and atomically re-checks every condition; the bytes only
-// after that. A crash in between leaks a file but never loses one that is
-// referenced.
+// statTimeout bounds the existence check Receive makes while it holds the
+// blob lock and a database connection.
+const statTimeout = 30 * time.Second
+
+// RemoveOrphan deletes a blob if, and only if, it is still an orphan.
+//
+// The row delete and the byte delete happen under the blob lock and commit
+// together, so a failed byte delete rolls the row back and the next pass
+// retries. A crash after the bytes are gone leaves an orphan row nothing can
+// attach to (Receive re-checks the bytes), which the next pass cleans up.
+//
+// This holds a pool connection across the backend delete, which is only
+// acceptable because GC is a single goroutine and ctx has a deadline.
 func (s *Service) RemoveOrphan(ctx context.Context, md5hex string, olderThan time.Time) (bool, error) {
 	if !ValidMD5(md5hex) {
 		return false, nil
 	}
-	mu := s.lock(md5hex)
-	mu.Lock()
-	defer mu.Unlock()
-	ok, err := s.files.DeleteOrphanBlob(ctx, md5hex, olderThan)
-	if err != nil || !ok {
+	var removed bool
+	err := s.files.LockBlob(ctx, md5hex, func(tx repo.BlobTx) error {
+		ok, err := tx.DeleteIfOrphan(ctx, olderThan)
+		if err != nil || !ok {
+			return err
+		}
+		if err := s.backend.Delete(ctx, BlobKey(md5hex)); err != nil && !errors.Is(err, storage.ErrNotFound) {
+			return fmt.Errorf("files: delete orphan bytes: %w", err)
+		}
+		removed = true
+		return nil
+	})
+	if err != nil {
 		return false, err
 	}
-	if err := s.backend.Delete(ctx, BlobKey(md5hex)); err != nil && !errors.Is(err, storage.ErrNotFound) {
-		return true, fmt.Errorf("files: delete orphan bytes: %w", err)
+	return removed, nil
+}
+
+// UntrackedBlobs lists committed blobs older than olderThan that the
+// database does not know about. They are left behind when the process dies,
+// or the database fails, between an upload committing its bytes and
+// recording the row. GC only follows rows, so without this sweep such bytes
+// would stay forever. scanned counts every blob in storage, so the caller can
+// tell a few stragglers from a database that doesn't match the store.
+func (s *Service) UntrackedBlobs(ctx context.Context, olderThan time.Time) (untracked []storage.Info, scanned int, err error) {
+	const batch = 1000
+	var out []storage.Info
+	pending := make(map[string]storage.Info, batch)
+	flush := func() error {
+		if len(pending) == 0 {
+			return nil
+		}
+		md5s := make([]string, 0, len(pending))
+		for m := range pending {
+			md5s = append(md5s, m)
+		}
+		unknown, err := s.files.UntrackedBlobs(ctx, md5s)
+		if err != nil {
+			return err
+		}
+		for _, m := range unknown {
+			out = append(out, pending[m])
+		}
+		clear(pending)
+		return nil
 	}
-	return true, nil
+	err = s.backend.Walk(ctx, "blobs/", func(info storage.Info) error {
+		m := path.Base(info.Key)
+		// Anything not shaped like a blob key is not ours to delete.
+		if !ValidMD5(m) || BlobKey(m) != info.Key {
+			return nil
+		}
+		scanned++
+		if !info.ModTime.Before(olderThan) {
+			return nil
+		}
+		pending[m] = info
+		if len(pending) >= batch {
+			return flush()
+		}
+		return nil
+	})
+	if err == nil {
+		err = flush()
+	}
+	if err != nil {
+		return nil, scanned, fmt.Errorf("files: list untracked blobs: %w", err)
+	}
+	return out, scanned, nil
+}
+
+// RemoveUntracked deletes the bytes of md5hex if no row and no live upload
+// token claim them, and they are still older than olderThan. It runs under
+// the blob lock, so an upload of the same content either finishes recording
+// its row first (and the bytes stay) or finds them gone and is told to retry
+// (ErrBlobCollected).
+func (s *Service) RemoveUntracked(ctx context.Context, md5hex string, olderThan time.Time) (bool, error) {
+	if !ValidMD5(md5hex) {
+		return false, nil
+	}
+	var removed bool
+	err := s.files.LockBlob(ctx, md5hex, func(tx repo.BlobTx) error {
+		ok, err := tx.Untracked(ctx)
+		if err != nil || !ok {
+			return err
+		}
+		info, err := s.backend.Stat(ctx, BlobKey(md5hex))
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("files: stat untracked bytes: %w", err)
+		}
+		if !info.ModTime.Before(olderThan) {
+			return nil
+		}
+		if err := s.backend.Delete(ctx, BlobKey(md5hex)); err != nil && !errors.Is(err, storage.ErrNotFound) {
+			return fmt.Errorf("files: delete untracked bytes: %w", err)
+		}
+		removed = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return removed, nil
 }
 
 func NewService(backend storage.Backend, files repo.FileRepo, secret string) *Service {
@@ -106,7 +225,7 @@ func (s *Service) Receive(ctx context.Context, body io.Reader, md5hex string, si
 	}
 	up, err := s.backend.Create(ctx)
 	if err != nil {
-		return fmt.Errorf("files: start upload: %w", err)
+		return storageErr("start upload", err)
 	}
 	defer func() { _ = up.Abort(context.WithoutCancel(ctx)) }()
 
@@ -115,21 +234,31 @@ func (s *Service) Receive(ctx context.Context, body io.Reader, md5hex string, si
 	// without buffering them.
 	n, err := io.CopyBuffer(io.MultiWriter(up, h), io.LimitReader(body, size+1), make([]byte, copyBufSize))
 	if err != nil {
-		return fmt.Errorf("files: receive upload: %w", err)
+		return storageErr("receive upload", err)
 	}
 	if n != size || hex.EncodeToString(h.Sum(nil)) != md5hex {
 		return ErrMismatch
 	}
-	mu := s.lock(md5hex)
-	mu.Lock()
-	defer mu.Unlock()
+	// Commit stays outside the lock because on S3 or WebDAV it can be a slow
+	// server-side copy, and holding a pool connection across that is how the
+	// pool deadlocked before. GC may delete the bytes Commit deduplicated
+	// against in that gap, so check they are still there once we hold the lock.
 	if err := up.Commit(ctx, BlobKey(md5hex)); err != nil {
-		return fmt.Errorf("files: commit upload: %w", err)
+		return storageErr("commit upload", err)
 	}
-	if err := s.files.PutBlob(ctx, repo.Blob{MD5: md5hex, Size: size, CreatedAt: s.now()}); err != nil {
-		return fmt.Errorf("files: record blob: %w", err)
-	}
-	return nil
+	return s.files.LockBlob(ctx, md5hex, func(tx repo.BlobTx) error {
+		sctx, cancel := context.WithTimeout(ctx, statTimeout)
+		defer cancel()
+		if _, err := s.backend.Stat(sctx, BlobKey(md5hex)); errors.Is(err, storage.ErrNotFound) {
+			return ErrBlobCollected
+		} else if err != nil {
+			return fmt.Errorf("files: check committed blob: %w", err)
+		}
+		if err := tx.Put(ctx, size); err != nil {
+			return fmt.Errorf("files: record blob: %w", err)
+		}
+		return nil
+	})
 }
 
 // Open returns the blob for md5hex. The reader may implement io.Seeker.

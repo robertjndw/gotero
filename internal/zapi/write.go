@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"iter"
 	"net/http"
 	"slices"
 	"time"
@@ -41,6 +42,7 @@ type outcome struct {
 // getter is the part of repo.LibraryReader the planner needs.
 type getter interface {
 	Get(ctx context.Context, t repo.ObjectType, keys []string) (map[string]repo.Object, error)
+	Versions(ctx context.Context, q repo.VersionsQuery) (iter.Seq2[repo.KeyVersion, error], error)
 }
 
 type planOpts struct {
@@ -154,7 +156,7 @@ func planWrite(ctx context.Context, g getter, opts planOpts, raws []json.RawMess
 	if err != nil {
 		return nil, err
 	}
-	refs, err := loadRefs(ctx, g, opts.Kind, entries, batchKeys)
+	refs, err := loadRefs(ctx, g, opts.Kind, entries, batchKeys, existing)
 	if err != nil {
 		return nil, err
 	}
@@ -171,8 +173,20 @@ func planWrite(ctx context.Context, g getter, opts planOpts, raws []json.RawMess
 		}
 		out[i] = planOne(opts, e, stored, refs)
 	}
-	failOrphans(opts.Kind, entries, out, existing, batchKeys)
-	return out, nil
+	// The tree checks look at the request as a whole, and failing an object
+	// puts its stored state back, which can strand or invalidate others.
+	// Failures only ever grow, so this settles.
+	tree := newPlanTree(g, opts.Kind, existing, refs)
+	for {
+		failOrphans(opts.Kind, entries, out, existing, batchKeys)
+		n, err := tree.check(ctx, out, existing)
+		if err != nil {
+			return nil, err
+		}
+		if n == 0 {
+			return out, nil
+		}
+	}
 }
 
 // failOrphans fails objects whose parent is another object of the same
@@ -228,11 +242,23 @@ func failOrphans(kind repo.ObjectType, entries []entry, out []outcome, existing 
 type refSets struct {
 	items       map[string]bool
 	collections map[string]bool
+	// parents holds the stored parents (of the request's own kind) that
+	// were loaded, so the tree checks know their type without another query.
+	parents map[string]repo.Object
 }
 
-func loadRefs(ctx context.Context, g getter, kind repo.ObjectType, entries []entry, batch map[string]bool) (refSets, error) {
-	refs := refSets{items: map[string]bool{}, collections: map[string]bool{}}
+func loadRefs(ctx context.Context, g getter, kind repo.ObjectType, entries []entry, batch map[string]bool, existing map[string]repo.Object) (refSets, error) {
+	refs := refSets{items: map[string]bool{}, collections: map[string]bool{}, parents: map[string]repo.Object{}}
 	var parentKeys, collKeys []string
+	// The current parents of stored items matter too: a PATCH that only
+	// changes the type of a child must still fit under its parent.
+	if kind == repo.TypeItem {
+		for _, o := range existing {
+			if p := nodeOf(kind, o.Data).parent; p != "" {
+				parentKeys = append(parentKeys, p)
+			}
+		}
+	}
 	for _, e := range entries {
 		if e.fail != nil {
 			continue
@@ -264,8 +290,9 @@ func loadRefs(ctx context.Context, g getter, kind repo.ObjectType, entries []ent
 		if err != nil {
 			return refs, err
 		}
-		for k := range found {
+		for k, o := range found {
 			refs.items[k] = true
+			refs.parents[k] = o
 		}
 	}
 	if len(collKeys) > 0 {
@@ -273,8 +300,11 @@ func loadRefs(ctx context.Context, g getter, kind repo.ObjectType, entries []ent
 		if err != nil {
 			return refs, err
 		}
-		for k := range found {
+		for k, o := range found {
 			refs.collections[k] = true
+			if kind == repo.TypeCollection {
+				refs.parents[k] = o
+			}
 		}
 	}
 	return refs, nil
@@ -502,13 +532,8 @@ func buildItem(opts planOpts, e entry, stored *repo.Object, refs refSets) (zoter
 	if opts.DenyNotes && (itemType == "note" || stringField(p.base, "itemType") == "note") {
 		return base, false, errNotesDenied
 	}
-	if parent := stringField(p.patch, "parentItem"); parent != "" {
-		if !childItemTypes[itemType] {
-			return base, false, badRequest("Only notes, attachments and annotations can be child items")
-		}
-		if !refs.items[parent] {
-			return base, false, missingRef("parentItem", parent, "Parent item %s not found")
-		}
+	if parent := stringField(p.patch, "parentItem"); parent != "" && !refs.items[parent] {
+		return base, false, missingRef("parentItem", parent, "Parent item %s not found")
 	}
 	known := map[string]bool{}
 	for _, k := range stringList(p.base, "collections") {
@@ -549,6 +574,14 @@ func buildItem(opts planOpts, e entry, stored *repo.Object, refs refSets) (zoter
 			convertItemType(opts.Schema, old, itemType, &merged)
 			changed = true
 		}
+	}
+	// Checked on the merged result, since a PATCH can turn a child note into
+	// a book without mentioning parentItem. A stored item that already
+	// breaks the rule is only refused when this write touches it, so legacy
+	// data does not lock the item against every other edit.
+	if parent := stringField(merged, "parentItem"); parent != "" && !childItemTypes[itemType] &&
+		(stored == nil || parent != stringField(p.base, "parentItem") || itemType != stringField(p.base, "itemType")) {
+		return base, false, badRequest("Only notes, attachments and annotations can be child items")
 	}
 	if changed && stored != nil && !p.patch.Has("dateModified") {
 		merged.Set("dateModified", quote(nowString(opts.Now)))
@@ -656,4 +689,225 @@ func buildSearch(opts planOpts, e entry, stored *repo.Object) (zotero.OrderedMap
 	defaults := func(m *zotero.OrderedMap) { m.SetDefault("conditions", json.RawMessage("[]")) }
 	merged, changed := mergeOrReplace(opts, p, stored, defaults, nil)
 	return merged, changed, nil
+}
+
+// treeNode is what the parent rules need to know about an item or a
+// collection.
+type treeNode struct {
+	itemType string
+	linkMode string
+	parent   string
+}
+
+func nodeOf(kind repo.ObjectType, data json.RawMessage) treeNode {
+	var m zotero.OrderedMap
+	if json.Unmarshal(data, &m) != nil {
+		return treeNode{}
+	}
+	if kind == repo.TypeCollection {
+		return treeNode{parent: stringField(m, "parentCollection")}
+	}
+	return treeNode{
+		itemType: stringField(m, "itemType"),
+		linkMode: stringField(m, "linkMode"),
+		parent:   stringField(m, "parentItem"),
+	}
+}
+
+// itemClass groups item types by where they may sit in the tree. Regular
+// types are interchangeable, so turning a book into a thesis never strands
+// a child.
+func itemClass(itemType string) string {
+	if childItemTypes[itemType] {
+		return itemType
+	}
+	return "regular"
+}
+
+// parentRule is zotero.org's check of a child against its parent: notes and
+// attachments hang off regular items, annotations off file attachments, and
+// the embedded images of a note off that note. That makes the tree at most
+// three levels deep, so enforcing it on every edge also rules out cycles.
+func parentRule(child treeNode, parentKey string, parent treeNode) *writeError {
+	if parent.itemType == "" {
+		return nil // stored data we cannot judge
+	}
+	switch child.itemType {
+	case "annotation":
+		if parent.itemType != "attachment" || parent.linkMode == "linked_url" {
+			return badRequest("Parent item %s of annotation must be a file attachment", parentKey)
+		}
+	case "note", "attachment":
+		embedded := child.itemType == "attachment" && child.linkMode == "embedded_image"
+		if childItemTypes[parent.itemType] && (!embedded || parent.itemType != "note") {
+			return badRequest("Parent item %s cannot be a note or attachment", parentKey)
+		}
+	}
+	return nil
+}
+
+// planTree is the request's view of the object tree: what each object will
+// look like if the request is saved as planned, with storage underneath.
+type planTree struct {
+	g      getter
+	kind   repo.ObjectType
+	saved  map[string]treeNode
+	stored map[string]treeNode
+}
+
+func (t *planTree) node(ctx context.Context, key string) (treeNode, bool, error) {
+	if n, ok := t.saved[key]; ok {
+		return n, true, nil
+	}
+	if n, ok := t.stored[key]; ok {
+		return n, true, nil
+	}
+	found, err := t.g.Get(ctx, t.kind, []string{key})
+	if err != nil {
+		return treeNode{}, false, err
+	}
+	o, ok := found[key]
+	if !ok {
+		return treeNode{}, false, nil
+	}
+	n := nodeOf(t.kind, o.Data)
+	t.stored[key] = n
+	return n, true, nil
+}
+
+// newPlanTree seeds the stored side of the tree with what planWrite already
+// loaded. It outlives one check, so repeated rounds do not query storage
+// again for nodes an earlier round looked up.
+func newPlanTree(g getter, kind repo.ObjectType, existing map[string]repo.Object, refs refSets) *planTree {
+	t := &planTree{g: g, kind: kind, stored: map[string]treeNode{}}
+	for k, o := range refs.parents {
+		t.stored[k] = nodeOf(kind, o.Data)
+	}
+	for k, o := range existing {
+		t.stored[k] = nodeOf(kind, o.Data)
+	}
+	return t
+}
+
+// check fails objects whose planned parent would break the item or
+// collection tree and returns how many it failed. Only edges the request
+// changes are judged, so a library that is already inconsistent can still
+// be edited, and repaired.
+func (t *planTree) check(ctx context.Context, out []outcome, existing map[string]repo.Object) (int, error) {
+	kind := t.kind
+	if kind != repo.TypeItem && kind != repo.TypeCollection {
+		return 0, nil
+	}
+	t.saved = map[string]treeNode{}
+	for _, o := range out {
+		if o.Status == outCreated || o.Status == outUpdated {
+			t.saved[o.Key] = nodeOf(kind, o.Obj.Data)
+		}
+	}
+	failed := 0
+	for i, o := range out {
+		n, ok := t.saved[o.Key]
+		if !ok {
+			continue
+		}
+		var before *treeNode
+		if _, ok := existing[o.Key]; ok {
+			b := t.stored[o.Key]
+			before = &b
+		}
+		var (
+			werr *writeError
+			err  error
+		)
+		if kind == repo.TypeCollection {
+			if n.parent != "" && (before == nil || n.parent != before.parent) {
+				werr, err = t.collectionCycle(ctx, o.Key, n.parent)
+			}
+		} else {
+			werr, err = t.itemEdges(ctx, o.Key, n, before)
+		}
+		if err != nil {
+			return 0, err
+		}
+		if werr != nil {
+			out[i] = outcome{Index: o.Index, Key: o.Key, Status: outFailed, Fail: zotero.WriteFailure{
+				Key: o.Key, Code: werr.Code, Message: werr.Msg, Data: werr.Data,
+			}}
+			delete(t.saved, o.Key)
+			failed++
+		}
+	}
+	return failed, nil
+}
+
+// collectionCycle walks up from the proposed parent. The visited set bounds
+// the walk even when stored data already holds a cycle; one that does not
+// pass through key was not made by this request and is left alone.
+func (t *planTree) collectionCycle(ctx context.Context, key, parent string) (*writeError, error) {
+	seen := map[string]bool{}
+	for cur := parent; cur != "" && !seen[cur]; {
+		if cur == key {
+			return conflict("Cannot move collection %s into its own subcollection %s", key, parent), nil
+		}
+		seen[cur] = true
+		n, ok, err := t.node(ctx, cur)
+		if err != nil || !ok {
+			return nil, err
+		}
+		cur = n.parent
+	}
+	return nil, nil
+}
+
+// itemEdges checks the item against its parent, and the item's stored
+// children against it when its type changes. before is nil for new items.
+func (t *planTree) itemEdges(ctx context.Context, key string, n treeNode, before *treeNode) (*writeError, error) {
+	if n.parent != "" {
+		_, parentSaved := t.saved[n.parent]
+		touched := before == nil || n.parent != before.parent || n.itemType != before.itemType ||
+			n.linkMode != before.linkMode || parentSaved
+		if touched {
+			p, ok, err := t.node(ctx, n.parent)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
+				if werr := parentRule(n, n.parent, p); werr != nil {
+					return werr, nil
+				}
+			}
+		}
+	}
+	if before == nil || (itemClass(n.itemType) == itemClass(before.itemType) && n.linkMode == before.linkMode) {
+		return nil, nil
+	}
+	// Children saved in this request are judged against the new type on
+	// their own. The rest stay under this item, trashed ones included, and
+	// must still fit there.
+	seq, err := t.g.Versions(ctx, repo.VersionsQuery{Type: repo.TypeItem, ParentKey: key, IncludeTrashed: true})
+	if err != nil {
+		return nil, err
+	}
+	var children []string
+	for kv, err := range seq {
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := t.saved[kv.Key]; !ok {
+			children = append(children, kv.Key)
+		}
+	}
+	if len(children) == 0 {
+		return nil, nil
+	}
+	found, err := t.g.Get(ctx, repo.TypeItem, children)
+	if err != nil {
+		return nil, err
+	}
+	for _, c := range found {
+		if parentRule(nodeOf(repo.TypeItem, c.Data), key, n) != nil {
+			return badRequest("Item %s has child items that cannot be under a %s", key, n.itemType), nil
+		}
+	}
+	return nil, nil
 }

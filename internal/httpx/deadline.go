@@ -77,7 +77,7 @@ func (b *deadlineBody) Read(p []byte) (int, error) {
 // handler, and any database cursor it holds, for as long as the socket stays
 // open. Once a write stalls for idle, it fails and the handler can bail out.
 type DeadlineWriter struct {
-	w    io.Writer
+	w    http.ResponseWriter
 	rc   *http.ResponseController
 	idle time.Duration
 	last time.Time
@@ -107,3 +107,16 @@ func (d *DeadlineWriter) Write(p []byte) (int, error) {
 
 // Release clears the deadline.
 func (d *DeadlineWriter) Release() { _ = d.rc.SetWriteDeadline(time.Time{}) }
+
+// ResponseWriter is the response with writes going through d, for code that
+// needs a whole http.ResponseWriter, such as http.ServeContent. It
+// deliberately hides io.ReaderFrom: sendfile would push a whole file in one
+// call, which never gives the rolling deadline a chance to move.
+func (d *DeadlineWriter) ResponseWriter() http.ResponseWriter { return deadlineResponse{d} }
+
+type deadlineResponse struct{ d *DeadlineWriter }
+
+func (r deadlineResponse) Header() http.Header         { return r.d.w.Header() }
+func (r deadlineResponse) WriteHeader(code int)        { r.d.w.WriteHeader(code) }
+func (r deadlineResponse) Write(p []byte) (int, error) { return r.d.Write(p) }
+func (r deadlineResponse) Unwrap() http.ResponseWriter { return r.d.w }

@@ -2,6 +2,7 @@ package zotero
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -207,4 +208,89 @@ func FuzzMerge(f *testing.F) {
 			t.Fatal("self-merge reported a change")
 		}
 	})
+}
+
+// An unchanged field must not stop Merge from looking at the ones after it.
+func TestMergeAfterUnchangedField(t *testing.T) {
+	stored := mustMap(t, `{"title":"same","date":"old"}`)
+	patch := mustMap(t, `{"key":"AAAAAAA2","version":3,"title":"same","date":"new"}`)
+	merged, changed := Merge(stored, patch)
+	if !changed {
+		t.Error("changed = false")
+	}
+	if got, _ := merged.GetString("date"); got != "new" {
+		t.Errorf("date = %q, want new (merged %s)", got, merged)
+	}
+}
+
+func TestEqualJSONNumberScale(t *testing.T) {
+	for _, tc := range []struct {
+		a, b string
+		want bool
+	}{
+		{"10", "0.1", false},
+		{"100", "1", false},
+		{"1000", "0.001", false},
+		{"10", "1e1", true},
+		{"100", "1.00e2", true},
+		{"0.10", "1e-1", true},
+	} {
+		if got := EqualJSON(json.RawMessage(tc.a), json.RawMessage(tc.b)); got != tc.want {
+			t.Errorf("EqualJSON(%s, %s) = %v, want %v", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
+// Exponents beyond +-2^40 are compared as written instead of being
+// normalized, and the sign must survive that fallback.
+func TestEqualJSONAbsurdExponent(t *testing.T) {
+	for _, tc := range []struct {
+		a, b string
+		want bool
+	}{
+		{"1e1099511627776", "1.0e1099511627776", true},
+		{"1e-1099511627776", "1.0e-1099511627776", true},
+		{"1e1099511627777", "1.0e1099511627777", false},
+		{"1e-1099511627777", "1.0e-1099511627777", false},
+		{"-1e1099511627777", "1e1099511627777", false},
+		{"-1e99999999999999999999", "1e99999999999999999999", false},
+		{" -1e1099511627777", "-1e1099511627777", true},
+	} {
+		if got := EqualJSON(json.RawMessage(tc.a), json.RawMessage(tc.b)); got != tc.want {
+			t.Errorf("EqualJSON(%s, %s) = %v, want %v", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
+// Nesting past maxCanonDepth makes canonicalization fail, so two spellings
+// of the same deep value no longer compare equal. The extra space keeps the
+// bytes.Equal shortcut out of the way.
+func TestEqualJSONDepthLimit(t *testing.T) {
+	arrays := func(n int) (string, string) {
+		s := strings.Repeat("[", n) + strings.Repeat("]", n)
+		return s, s[:n] + " " + s[n:]
+	}
+	objects := func(n int) (string, string) {
+		s := strings.Repeat(`{"a":`, n) + "1" + strings.Repeat("}", n)
+		return s, strings.Replace(s, "1", " 1", 1)
+	}
+	for name, mk := range map[string]func(int) (string, string){"arrays": arrays, "objects": objects} {
+		a, b := mk(maxCanonDepth)
+		if !EqualJSON(json.RawMessage(a), json.RawMessage(b)) {
+			t.Errorf("%s at the limit should compare equal", name)
+		}
+		a, b = mk(maxCanonDepth + 2)
+		if EqualJSON(json.RawMessage(a), json.RawMessage(b)) {
+			t.Errorf("%s past the limit should not be canonicalized", name)
+		}
+	}
+}
+
+func mustMap(t *testing.T, s string) OrderedMap {
+	t.Helper()
+	var m OrderedMap
+	if err := json.Unmarshal([]byte(s), &m); err != nil {
+		t.Fatal(err)
+	}
+	return m
 }

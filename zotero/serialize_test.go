@@ -217,3 +217,12 @@ func BenchmarkMarshalItemData(b *testing.B) {
 		}
 	}
 }
+
+func TestMarshalItemDataEmptyItemType(t *testing.T) {
+	var m OrderedMap
+	m.Set("itemType", json.RawMessage(`""`))
+	m.Set("title", json.RawMessage(`"t"`))
+	if _, err := MarshalItemData(m, nil, 0); !errors.Is(err, ErrNoItemType) {
+		t.Errorf("empty itemType: %v", err)
+	}
+}

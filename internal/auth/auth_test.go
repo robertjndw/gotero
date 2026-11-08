@@ -181,3 +181,80 @@ func TestLibraryAccess(t *testing.T) {
 		}
 	}
 }
+
+// A key deleted straight from the database (the CLI, another instance)
+// stays cached for the TTL. Stream revalidation exists to catch exactly that,
+// so its lookup must not be answered from the cache.
+func TestAuthenticateFreshIgnoresCache(t *testing.T) {
+	keys := &fakeKeys{keys: map[string]repo.APIKey{string(HashToken("k")): {ID: 1, UserID: 1}}}
+	users := &fakeUsers{users: map[int64]repo.User{1: {ID: 1}}}
+	a := NewAuthenticator(keys, users)
+	if _, err := a.Authenticate(context.Background(), "k"); err != nil {
+		t.Fatal(err)
+	}
+	delete(keys.keys, string(HashToken("k")))
+
+	if _, err := a.Authenticate(context.Background(), "k"); err != nil {
+		t.Fatalf("cached lookup should still succeed within the TTL: %v", err)
+	}
+	if _, err := a.AuthenticateFresh(context.Background(), "k"); !errors.Is(err, ErrInvalidKey) {
+		t.Fatalf("fresh lookup of a deleted key: got %v, want ErrInvalidKey", err)
+	}
+}
+
+// Write, Notes and Files are refinements of Library, not grants of their own:
+// a key without library access must not reach the library through them.
+func TestUserLibraryAccessNeedsLibraryFlag(t *testing.T) {
+	p := Principal{User: repo.User{ID: 1}, Key: repo.APIKey{Access: repo.KeyAccess{Notes: true, Files: true, Write: true, Groups: "all"}}}
+	if got := UserLibraryAccess(p, 1); got != (LibraryAccess{}) {
+		t.Fatalf("key without library access got %+v", got)
+	}
+}
+
+func TestVerifyRejectsMalformedHashSegments(t *testing.T) {
+	good, err := HashPassword("pw-for-the-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := strings.Split(good, "$")
+	for name, h := range map[string]string{
+		// An empty derived key would compare equal to an empty argon2 output,
+		// so every password would match.
+		"empty hash":     strings.Join(append(parts[:5:5], ""), "$"),
+		"old version":    strings.Replace(good, "$v=19$", "$v=16$", 1),
+		"future version": strings.Replace(good, "$v=19$", "$v=20$", 1),
+	} {
+		for _, pw := range []string{"pw-for-the-test", ""} {
+			ok, err := VerifyPassword(h, pw)
+			if ok || !errors.Is(err, ErrInvalidHash) {
+				t.Errorf("%s, password %q: ok=%v err=%v, want ErrInvalidHash", name, pw, ok, err)
+			}
+		}
+	}
+}
+
+// Clearing the whole cache when it fills is a spray defence; below the cap
+// every valid key must stay cached alongside the others.
+func TestAuthenticatorCachesSeveralKeys(t *testing.T) {
+	keys := &fakeKeys{keys: map[string]repo.APIKey{
+		string(HashToken("one")): {ID: 1, UserID: 7},
+		string(HashToken("two")): {ID: 2, UserID: 7},
+	}}
+	users := &fakeUsers{users: map[int64]repo.User{7: {ID: 7}}}
+	a := NewAuthenticator(keys, users)
+	ctx := context.Background()
+	for _, k := range []string{"one", "two"} {
+		if _, err := a.Authenticate(ctx, k); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := keys.calls
+	for _, k := range []string{"one", "two"} {
+		if p, err := a.Authenticate(ctx, k); err != nil || p.Raw != k {
+			t.Fatalf("%s: %+v %v", k, p, err)
+		}
+	}
+	if keys.calls != before {
+		t.Fatalf("cached keys were looked up again: %d extra DB calls", keys.calls-before)
+	}
+}

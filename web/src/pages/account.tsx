@@ -19,7 +19,7 @@ import {
 } from '@/lib/queries'
 import type { ApiKey, ApiKeyAccess, CreatedApiKey, Identity } from '@/lib/types'
 import { formatDate, relativeTime } from '@/lib/format'
-import { applyServerError } from '@/lib/forms'
+import { applyServerError, MIN_PASSWORD_LENGTH, passwordHint } from '@/lib/forms'
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -124,7 +124,7 @@ function ProfileCard() {
 const pwSchema = z
   .object({
     currentPassword: z.string().optional(),
-    newPassword: z.string().min(8, 'At least 8 characters'),
+    newPassword: z.string().min(MIN_PASSWORD_LENGTH, passwordHint),
     confirm: z.string(),
   })
   .refine((v) => v.newPassword === v.confirm, {

@@ -12,10 +12,11 @@ import (
 	"github.com/robertjndw/gotero/internal/repo"
 )
 
-// RunForeground drives a queued job to its end in the calling process and
+// RunForeground drives one queued job to its end in the calling process and
 // prints a line whenever the progress changes. It is for the command line,
-// where nobody polls the web UI. If a running server claims the job first,
-// the function just follows it.
+// where nobody polls the web UI. It only ever claims jobID, never another
+// user's job. If a running server claims the job first, the function just
+// follows it, and takes it over should that server's lease run out.
 func (w *Worker) RunForeground(ctx context.Context, jobID int64, out io.Writer) error {
 	imports := w.Store.Imports()
 	runErr := make(chan error, 1)
@@ -30,16 +31,25 @@ func (w *Worker) RunForeground(ctx context.Context, jobID int64, out io.Writer) 
 				runErr <- nil
 				return
 			}
-			did, err := w.RunOnce(ctx)
-			if err != nil {
-				runErr <- err
-				return
-			}
-			if !did {
-				select {
-				case <-ctx.Done():
-				case <-time.After(time.Second):
+			if j.Status == "queued" {
+				token := newToken()
+				claimed, err := imports.Claim(ctx, jobID, token, w.LeaseDuration)
+				switch {
+				case err == nil:
+					w.process(ctx, claimed, token)
+					continue
+				case !errors.Is(err, repo.ErrNotFound) && ctx.Err() == nil:
+					runErr <- err
+					return
 				}
+			} else {
+				// Running elsewhere. If that process died, nobody else
+				// may be around to hand the job back to the queue.
+				w.requeueExpired(ctx)
+			}
+			select {
+			case <-ctx.Done():
+			case <-time.After(time.Second):
 			}
 		}
 		runErr <- ctx.Err()

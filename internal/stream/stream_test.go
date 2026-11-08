@@ -23,12 +23,14 @@ type fakeResolver struct {
 	mu   sync.Mutex
 	keys map[string][]string // key -> topics
 	down bool                // every lookup fails, like an unreachable database
+	// flaky keys fail with a transient error while the rest still resolve.
+	flaky map[string]bool
 }
 
 func (f *fakeResolver) KeyTopics(_ context.Context, key string) (int64, []string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.down {
+	if f.down || f.flaky[key] {
 		return 0, nil, errors.New("database unreachable")
 	}
 	t, ok := f.keys[key]
@@ -385,4 +387,219 @@ func TestRevocationRemovesExplicitTopics(t *testing.T) {
 	c.send(map[string]any{"topics": []string{"styles"}})
 	// The reply arrives, not a topicUpdated for the revoked topic.
 	c.expectEvent("subscriptionsCreated")
+}
+
+// assertQuiet checks that nothing is queued for c: a subscription round trip
+// is answered in order, so if the reply comes first nothing was pending.
+func (c *client) assertQuiet() {
+	c.t.Helper()
+	c.send(map[string]any{"topics": []string{"translators"}})
+	if m := c.recv(); m["event"] != "subscriptionsCreated" {
+		c.t.Fatalf("unexpected event %v", m)
+	}
+}
+
+func topicsOf(m map[string]any) []string {
+	var out []string
+	for _, s := range m["subscriptions"].([]any) {
+		for _, t := range s.(map[string]any)["topics"].([]any) {
+			out = append(out, t.(string))
+		}
+	}
+	return out
+}
+
+// Library topics carry change notifications for private libraries; without
+// a key nobody has shown they may read them.
+func TestKeylessSubscriptionCannotReachLibraries(t *testing.T) {
+	h, _, url := setup(t)
+	c := dial(t, url, nil)
+	c.expectEvent("connected")
+	c.send(map[string]any{"topics": []string{"/users/1", "/groups/5"}})
+	m := c.expectEvent("subscriptionsCreated")
+	if subs := m["subscriptions"].([]any); len(subs) != 0 {
+		t.Fatalf("library topics subscribed without a key: %v", m)
+	}
+	if errs := m["errors"].([]any); len(errs) != 2 {
+		t.Fatalf("want an error per topic: %v", m)
+	}
+	h.Publish("/users/1", 1)
+	h.Publish("/groups/5", 1)
+	c.assertQuiet()
+}
+
+// One message may carry several subscriptions; each is handled on its own
+// and a bad one does not spoil the others.
+func TestCreateSeveralSubscriptionsAtOnce(t *testing.T) {
+	h, r, url := setup(t)
+	r.set("OTHER", "/groups/7", "/groups/8")
+	c := dial(t, url, nil)
+	c.expectEvent("connected")
+	c.send(map[string]any{"action": "createSubscriptions", "subscriptions": []any{
+		map[string]any{"topics": []string{"styles", "/users/1"}},
+		map[string]any{"apiKey": "NOPE"},
+		map[string]any{"apiKey": "KEY", "topics": []string{"/users/1", "/groups/9"}},
+		map[string]any{"apiKey": "OTHER"},
+	}})
+	m := c.expectEvent("subscriptionsCreated")
+	if got := strings.Join(topicsOf(m), ","); got != "styles,/users/1,/groups/7,/groups/8" {
+		t.Fatalf("subscribed %s: %v", got, m)
+	}
+	// Key-less /users/1, the invalid key and the foreign /groups/9.
+	if errs := m["errors"].([]any); len(errs) != 3 {
+		t.Fatalf("want 3 errors: %v", m)
+	}
+	h.Publish("/groups/8", 4)
+	if m := c.expectEvent("topicUpdated"); m["topic"] != "/groups/8" {
+		t.Fatalf("got %v", m)
+	}
+}
+
+func TestDeleteSingleTopic(t *testing.T) {
+	h, r, url := setup(t)
+	r.set("OTHER", "/groups/7")
+	c := dial(t, url, nil)
+	c.expectEvent("connected")
+	c.send(map[string]any{"action": "createSubscriptions", "subscriptions": []any{
+		map[string]any{"apiKey": "KEY"},
+		map[string]any{"apiKey": "OTHER"},
+	}})
+	c.expectEvent("subscriptionsCreated")
+
+	c.send(map[string]any{"action": "deleteSubscriptions", "subscriptions": []any{
+		map[string]any{"apiKey": "KEY", "topic": "/groups/5"},
+	}})
+	c.expectEvent("subscriptionsDeleted")
+	h.Publish("/groups/5", 1)
+	h.Publish("/users/1", 2)
+	if m := c.expectEvent("topicUpdated"); m["topic"] != "/users/1" {
+		t.Fatalf("the other topic of the key must stay: %v", m)
+	}
+	h.Publish("/groups/7", 3)
+	if m := c.expectEvent("topicUpdated"); m["topic"] != "/groups/7" {
+		t.Fatalf("another key's subscription must stay: %v", m)
+	}
+
+	// Deleting the last topic leaves the subscription with nothing to hear.
+	c.send(map[string]any{"action": "deleteSubscriptions", "subscriptions": []any{
+		map[string]any{"apiKey": "KEY", "topic": "/users/1"},
+	}})
+	c.expectEvent("subscriptionsDeleted")
+	h.Publish("/users/1", 4)
+	c.assertQuiet()
+}
+
+// The cap is per connection, not per message: a client must not get past it
+// by spreading subscriptions over several messages and subscriptions.
+func TestTooManySubscriptionsAcrossMessages(t *testing.T) {
+	_, r, url := setup(t)
+	var a, b []string
+	for i := range 30 {
+		a = append(a, zs.GroupTopic(int64(100+i)))
+		b = append(b, zs.GroupTopic(int64(200+i)))
+	}
+	r.set("A", a...)
+	r.set("B", b...)
+	c := dial(t, url, nil)
+	c.expectEvent("connected")
+	c.send(map[string]any{"action": "createSubscriptions", "subscriptions": []any{
+		map[string]any{"apiKey": "A"},
+		map[string]any{"topics": []string{"styles"}},
+	}})
+	c.expectEvent("subscriptionsCreated")
+	c.send(map[string]any{"apiKey": "B"})
+	if code := c.closeCode(); code != zs.CloseTooManySubs {
+		t.Fatalf("close code %d", code)
+	}
+}
+
+// Each key on a connection is checked on its own: revoking one key must
+// remove its topics even when another key's subscription comes first.
+func TestRevalidateRevokesOneOfSeveralKeys(t *testing.T) {
+	h, r, url := setup(t)
+	r.set("B", "/groups/7")
+	c := dial(t, url, nil)
+	c.expectEvent("connected")
+	c.send(map[string]any{"action": "createSubscriptions", "subscriptions": []any{
+		map[string]any{"apiKey": "KEY"},
+		map[string]any{"apiKey": "B"},
+	}})
+	c.expectEvent("subscriptionsCreated")
+
+	r.mu.Lock()
+	delete(r.keys, "B")
+	r.mu.Unlock()
+	h.Revalidate(context.Background())
+	if m := c.expectEvent("topicRemoved"); m["topic"] != "/groups/7" || m["apiKey"] != "B" {
+		t.Fatalf("got %v", m)
+	}
+	h.Publish("/groups/7", 1)
+	h.Publish("/users/1", 2)
+	if m := c.expectEvent("topicUpdated"); m["topic"] != "/users/1" {
+		t.Fatalf("the remaining key must keep its topics: %v", m)
+	}
+}
+
+// A lookup that fails for now says nothing about the key. Its topics stay,
+// and the other keys on the connection are still checked.
+func TestRevalidateSkipsTransientFailures(t *testing.T) {
+	h, r, url := setup(t)
+	r.set("B", "/groups/7")
+	c := dial(t, url, nil)
+	c.expectEvent("connected")
+	c.send(map[string]any{"action": "createSubscriptions", "subscriptions": []any{
+		map[string]any{"apiKey": "KEY"},
+		map[string]any{"apiKey": "B"},
+	}})
+	c.expectEvent("subscriptionsCreated")
+
+	r.mu.Lock()
+	r.flaky = map[string]bool{"KEY": true}
+	delete(r.keys, "B")
+	r.mu.Unlock()
+	h.Revalidate(context.Background())
+	if m := c.expectEvent("topicRemoved"); m["topic"] != "/groups/7" {
+		t.Fatalf("got %v", m)
+	}
+	h.Publish("/users/1", 1)
+	if m := c.expectEvent("topicUpdated"); m["topic"] != "/users/1" {
+		t.Fatalf("a failed lookup dropped the key's topics: %v", m)
+	}
+}
+
+// Public topics (styles, translators) are not library access and survive the
+// key that subscribed to them being revoked.
+func TestRevalidateKeepsPublicTopics(t *testing.T) {
+	h, r, url := setup(t)
+	c := dial(t, url, nil)
+	c.expectEvent("connected")
+	c.send(map[string]any{"apiKey": "KEY", "topics": []string{"styles", "/users/1"}})
+	c.expectEvent("subscriptionsCreated")
+
+	r.mu.Lock()
+	delete(r.keys, "KEY")
+	r.mu.Unlock()
+	h.Revalidate(context.Background())
+	if m := c.expectEvent("topicRemoved"); m["topic"] != "/users/1" {
+		t.Fatalf("got %v", m)
+	}
+	h.Publish("styles", 1)
+	if m := c.expectEvent("topicUpdated"); m["topic"] != "styles" {
+		t.Fatalf("public topic was dropped: %v", m)
+	}
+}
+
+func TestExactlyMaxSubscriptionsIsAllowed(t *testing.T) {
+	h, r, url := setup(t)
+	var topics []string
+	for i := range zs.MaxSubscriptions {
+		topics = append(topics, zs.GroupTopic(int64(i+1)))
+	}
+	r.set("FULL", topics...)
+	c := dial(t, url, nil)
+	c.expectEvent("connected")
+	c.send(map[string]any{"apiKey": "FULL"})
+	c.expectEvent("subscriptionsCreated")
+	h.Publish(topics[len(topics)-1], 1)
+	c.expectEvent("topicUpdated")
 }

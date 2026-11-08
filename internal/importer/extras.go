@@ -14,11 +14,14 @@ import (
 const fulltextBatch = 20
 
 func (r *run) syncSettings(ctx context.Context, l *lib) error {
-	remote, lmv, err := l.src.Settings(ctx, 0)
+	remote, lmv, err := l.src.Settings(ctx, l.st.Since[phaseSettings])
+	if zoteroclient.IsNotModified(err) {
+		remote, err = nil, nil
+	}
 	if err != nil {
 		return err
 	}
-	l.observe(r, lmv)
+	l.listed(r, phaseSettings, lmv)
 	rd, err := r.w.Store.Library(ctx, l.id)
 	if err != nil {
 		return err
@@ -51,7 +54,7 @@ func (r *run) syncSettings(ctx context.Context, l *lib) error {
 	if len(put) == 0 {
 		return nil
 	}
-	_, err = r.w.Store.InLibrary(ctx, l.id, func(tx repo.LibraryTx) error {
+	_, err = r.write(ctx, l, func(tx repo.LibraryTx) error {
 		if err := tx.ClearDeleted(ctx, repo.TypeSetting, keys); err != nil {
 			return err
 		}
@@ -76,14 +79,17 @@ func (r *run) syncSettings(ctx context.Context, l *lib) error {
 }
 
 func (r *run) syncFulltext(ctx context.Context, l *lib) error {
-	remote, lmv, err := l.src.FulltextVersions(ctx, 0)
+	remote, lmv, err := l.src.FulltextVersions(ctx, l.st.Since[phaseFulltext])
 	if zoteroclient.IsForbidden(err) || zoteroclient.IsNotFound(err) {
 		return nil
+	}
+	if zoteroclient.IsNotModified(err) {
+		remote, err = nil, nil
 	}
 	if err != nil {
 		return err
 	}
-	l.observe(r, lmv)
+	l.listed(r, phaseFulltext, lmv)
 	rd, err := r.w.Store.Library(ctx, l.id)
 	if err != nil {
 		return err
@@ -120,6 +126,8 @@ func (r *run) syncFulltext(ctx context.Context, l *lib) error {
 			if _, ok := items[key]; !ok {
 				return nil
 			}
+			// Not observed for drift: zotero.org answers this endpoint with
+			// the version of the item's full text, not the library's.
 			c, _, err := l.src.Fulltext(ctx, key)
 			if zoteroclient.IsNotFound(err) {
 				return nil
@@ -143,7 +151,7 @@ func (r *run) syncFulltext(ctx context.Context, l *lib) error {
 			return err
 		}
 		if len(out) > 0 {
-			_, err = r.w.Store.InLibrary(ctx, l.id, func(tx repo.LibraryTx) error {
+			_, err = r.write(ctx, l, func(tx repo.LibraryTx) error {
 				if !l.fresh {
 					v, err := tx.NextVersion(ctx)
 					if err != nil {

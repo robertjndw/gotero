@@ -98,7 +98,12 @@ function GcCard() {
           if (!preview || preview.orphanBlobs === 0) return setPreview(null)
           gc.mutate(false, {
             onSuccess: (r) => {
-              toast.success(`Deleted ${r.orphanBlobs} files (${formatBytes(r.orphanBytes)})`)
+              const msg = `Deleted ${r.orphanBlobs} files (${formatBytes(r.orphanBytes)})`
+              if (r.failed) {
+                toast.warning(`${msg}. ${r.failed} could not be removed and will be retried; see the server log.`)
+              } else {
+                toast.success(msg)
+              }
               setPreview(null)
             },
             onError: (e) => toast.error(errorMessage(e)),

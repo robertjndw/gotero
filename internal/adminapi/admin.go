@@ -294,10 +294,15 @@ func (a *API) runGC(c *gin.Context) error {
 	var res jobs.GCResult
 	if a.GC != nil {
 		var err error
-		if res, err = a.GC.GC(c.Request.Context(), in.DryRun); err != nil {
+		// Blobs that could not be removed are logged by GC and retried on the
+		// next pass; the rest of the sweep still happened, so report it with
+		// a count rather than failing the whole request.
+		if res, err = a.GC.GC(c.Request.Context(), in.DryRun); err != nil && !jobs.OnlyBlobFailures(err) {
 			return err
 		}
 	}
-	c.JSON(http.StatusOK, gin.H{"orphanBlobs": res.OrphanBlobs, "orphanBytes": res.OrphanBytes, "deleted": res.Deleted})
+	c.JSON(http.StatusOK, gin.H{
+		"orphanBlobs": res.OrphanBlobs, "orphanBytes": res.OrphanBytes, "deleted": res.Deleted, "failed": res.Failed,
+	})
 	return nil
 }

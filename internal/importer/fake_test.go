@@ -289,6 +289,13 @@ func (f *fakeZotero) library(w http.ResponseWriter, r *http.Request, l *fakeLibr
 		// Ask the client to pause once; zoteroclient must honor it.
 		w.Header().Set("Backoff", "1")
 	}
+	since, _ := strconv.ParseInt(q.Get("since"), 10, 64)
+	if ims := r.Header.Get("If-Modified-Since-Version"); ims != "" {
+		if v, _ := strconv.ParseInt(ims, 10, 64); l.version <= v {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+	}
 	switch parts[0] {
 	case "collections", "searches", "items":
 		var set map[string]fakeObj
@@ -320,6 +327,9 @@ func (f *fakeZotero) library(w http.ResponseWriter, r *http.Request, l *fakeLibr
 				if top && o.data["parentItem"] != nil {
 					continue
 				}
+				if o.version <= since {
+					continue
+				}
 				out[k] = o.version
 			}
 			jsonOut(w, 200, out)
@@ -343,11 +353,19 @@ func (f *fakeZotero) library(w http.ResponseWriter, r *http.Request, l *fakeLibr
 	case "settings":
 		out := map[string]map[string]any{}
 		for k, v := range l.settings {
-			out[k] = map[string]any{"value": v, "version": l.setVersions[k]}
+			if l.setVersions[k] > since {
+				out[k] = map[string]any{"value": v, "version": l.setVersions[k]}
+			}
 		}
 		jsonOut(w, 200, out)
 	case "fulltext":
-		jsonOut(w, 200, l.ftVersions)
+		out := map[string]int64{}
+		for k, v := range l.ftVersions {
+			if v > since {
+				out[k] = v
+			}
+		}
+		jsonOut(w, 200, out)
 	default:
 		http.NotFound(w, r)
 	}

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 
 	"github.com/robertjndw/gotero/internal/auth"
@@ -33,6 +34,7 @@ func bg() context.Context { return context.Background() }
 type env struct {
 	t     testing.TB
 	store *pg.Store
+	pool  *pgxpool.Pool
 	files *files.Service
 	user  repo.User
 	fz    *fakeZotero
@@ -58,7 +60,7 @@ func newEnv(t testing.TB) *env {
 		BaseURL: fz.URL(), ProgressInterval: time.Millisecond, PollInterval: 20 * time.Millisecond,
 	})
 	w.retryDelay = time.Millisecond
-	return &env{t: t, store: store, files: fs, user: u, fz: fz, w: w}
+	return &env{t: t, store: store, pool: pool, files: fs, user: u, fz: fz, w: w}
 }
 
 type jobOpts struct{ groups, files bool }

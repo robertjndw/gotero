@@ -6,7 +6,7 @@ gotero can copy your zotero.org library into your gotero account: collections, s
 
 1. Open <https://www.zotero.org/settings/keys> and choose "Create new private key".
 2. Give it a name such as "gotero import".
-3. Under "Personal library" tick **Allow library access** and **Allow notes access**. Tick **Allow file access** if you want the attachments. Write access is not needed.
+3. Under "Personal library" tick **Allow library access** and **Allow notes access**. Both are required: zotero.org hides notes from a key without notes access, so gotero refuses such a key instead of importing a library with every note missing. Tick **Allow file access** if you want the attachments. Write access is not needed.
 4. Under "Default group permissions" choose **Read only** (or "Read/Write") so groups can be imported.
 5. Save the key and copy it. You can delete the key on zotero.org after the import.
 
@@ -20,7 +20,13 @@ gotero can copy your zotero.org library into your gotero account: collections, s
 echo "YOUR_ZOTERO_KEY" | gotero import --user alice --api-key-stdin
 ```
 
-Add `--no-files` to skip attachments or `--no-groups` to skip group libraries. The command prints a progress line as it goes and exits with an error if the import fails. Press Ctrl-C to stop; the import resumes where it left off the next time it runs.
+Add `--no-files` to skip attachments or `--no-groups` to skip group libraries. The command prints a progress line as it goes and exits with an error if the import fails. Press Ctrl-C to stop; the import resumes where it left off the next time it runs. A running gotero server may also pick the stopped import up and finish it in the background.
+
+The command line import uses the same storage quota as the server. Unlike an import started in the web UI, it cannot notify Zotero clients connected to a running server, so they see the imported data on their next regular sync rather than right away.
+
+An account has at most one import queued or running at a time. Starting another one in the web UI is refused until the first ends or is cancelled. Running `gotero import` again while an earlier one is still queued resumes that one, with the options and key it was started with.
+
+An import is held by the process running it (the server or `gotero import`) only while that process is alive. If the process crashes or is killed, the import is handed back to the queue after about two minutes and continues in the server, or in the next `gotero import` for that user.
 
 The key is stored only while the import runs and is deleted when it ends.
 
@@ -28,7 +34,7 @@ The key is stored only while the import runs and is deleted when it ends.
 
 - Your personal library: collections, saved searches, items with their tags, relations and child notes, the trash, settings (such as tag colours) and full-text content.
 - Into an empty library, object keys and versions are kept exactly as they are on zotero.org. See "Importing into a library that already has content" below for what happens otherwise.
-- Files: attachments that zotero.org stores (stored files and snapshots). Linked files and links stay as links. Zipped snapshots are first saved to a temporary file on the server while they download, so the server's temp directory needs room for the largest snapshot.
+- Files: attachments that zotero.org stores (stored files, snapshots and images embedded in notes). Linked files and links stay as links. Zipped snapshots are first saved to a temporary file on the server while they download, so the server's temp directory needs room for the largest snapshot.
 - Groups, if you chose to include them: for every group your key can read, gotero creates a group with the **same group ID** and copies the name, description and settings. **You become the owner.** Other zotero.org members are not created or invited; add them again in gotero.
 
 ## What is not imported
@@ -44,7 +50,9 @@ An import can be repeated safely. Objects are matched by key: those that are new
 
 ### Importing into a library that already has content
 
-The first import into an empty library keeps zotero.org's object versions, so a desktop that synced with zotero.org carries on without a full resync. If the import is interrupted and resumed, it still counts as that first import.
+The first import into an empty library keeps zotero.org's object versions, so a desktop that synced with zotero.org carries on without a full resync. If the import is interrupted and resumed, it still counts as that first import. The same holds when it failed or ended with the "kept changing" warning and you start it again, as long as nothing else wrote to the library in gotero in between.
+
+If your zotero.org library changes while it is being imported, for example because a desktop is still syncing with zotero.org, gotero notices and copies the changes in up to two more passes. If the library is still changing after that, the import ends with a warning that changes made after a given library version may be missing, and gotero does not claim to be at the newest zotero.org version. Stop syncing with zotero.org and run the import again to pick up the rest.
 
 Every other import, including each rerun, works differently:
 

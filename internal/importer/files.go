@@ -62,7 +62,7 @@ func (r *run) candidates(ctx context.Context, libID int64) ([]fileCand, error) {
 		}
 		mode, _ := m.GetString("linkMode")
 		sum, _ := m.GetString("md5")
-		if (mode != "imported_file" && mode != "imported_url") || !files.ValidMD5(sum) {
+		if !storesFile(mode) || !files.ValidMD5(sum) {
 			continue
 		}
 		name, _ := m.GetString("filename")
@@ -73,6 +73,17 @@ func (r *run) candidates(ctx context.Context, libID int64) ([]fileCand, error) {
 		out = append(out, fileCand{key: o.Key, md5: sum, filename: name, mtime: mtime})
 	}
 	return out, nil
+}
+
+// storesFile reports whether attachments of a link mode keep their file on
+// zotero.org. It matches what the API write path treats as file-carrying,
+// including images embedded in notes.
+func storesFile(linkMode string) bool {
+	switch linkMode {
+	case "imported_file", "imported_url", "embedded_image":
+		return true
+	}
+	return false
 }
 
 func (r *run) syncFiles(ctx context.Context, l *lib) error {

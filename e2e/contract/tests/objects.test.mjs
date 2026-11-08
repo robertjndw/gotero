@@ -106,7 +106,17 @@ for (const ref of await pinnedRefs()) {
         name: 'contract search',
         conditions: [{ condition: 'title', operator: 'contains', value: 'x' }],
       };
-      const parent = noteItem();
+      // Child notes may only hang off regular items, so the parent can't be a note.
+      const parent = {
+        key: objectKey(),
+        version: 0,
+        itemType: 'book',
+        title: 'contract parent',
+        creators: [],
+        tags: [],
+        collections: [],
+        relations: {},
+      };
       const child = noteItem({ parentItem: parent.key });
       const trashed = noteItem({ deleted: 1 });
       let beforeFirst, beforeLast;

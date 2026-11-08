@@ -15,7 +15,7 @@ import {
 } from '@/lib/queries'
 import type { User } from '@/lib/types'
 import { formatBytes, relativeTime } from '@/lib/format'
-import { applyServerError } from '@/lib/forms'
+import { applyServerError, MIN_PASSWORD_LENGTH, passwordHint, usernameSchema } from '@/lib/forms'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -58,13 +58,10 @@ import { QuotaInput } from '@/components/quota-input'
 import { useProviderName } from '@/components/sso'
 
 const createSchema = z.object({
-  username: z
-    .string()
-    .min(3, 'At least 3 characters')
-    .regex(/^[A-Za-z0-9._-]+$/, 'Letters, numbers, dots, dashes and underscores only'),
+  username: usernameSchema,
   displayName: z.string().min(1, 'Enter a display name'),
   email: z.email('Enter a valid email address'),
-  password: z.string().min(8, 'At least 8 characters'),
+  password: z.string().min(MIN_PASSWORD_LENGTH, passwordHint),
   isAdmin: z.boolean(),
   quotaBytes: z.number().nullable(),
 })
@@ -208,7 +205,7 @@ const editSchema = z.object({
   isAdmin: z.boolean(),
   disabled: z.boolean(),
   quotaBytes: z.number().nullable(),
-  password: z.string().refine((v) => v === '' || v.length >= 8, 'At least 8 characters'),
+  password: z.string().refine((v) => v === '' || v.length >= MIN_PASSWORD_LENGTH, passwordHint),
 })
 type EditValues = z.infer<typeof editSchema>
 

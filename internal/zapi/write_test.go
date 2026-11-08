@@ -3,6 +3,7 @@ package zapi
 import (
 	"context"
 	"encoding/json"
+	"iter"
 	"testing"
 	"time"
 
@@ -38,6 +39,23 @@ func (f *fakeLib) Get(_ context.Context, t repo.ObjectType, keys []string) (map[
 		}
 	}
 	return out, nil
+}
+
+// Versions only answers the parent lookups the planner makes.
+func (f *fakeLib) Versions(_ context.Context, q repo.VersionsQuery) (iter.Seq2[repo.KeyVersion, error], error) {
+	var out []repo.KeyVersion
+	for k, o := range f.objs[q.Type] {
+		if q.ParentKey != "" && nodeOf(q.Type, o.Data).parent == q.ParentKey {
+			out = append(out, repo.KeyVersion{Key: k, Version: o.Version})
+		}
+	}
+	return func(yield func(repo.KeyVersion, error) bool) {
+		for _, kv := range out {
+			if !yield(kv, nil) {
+				return
+			}
+		}
+	}, nil
 }
 
 var fixedNow = time.Date(2025, 3, 4, 5, 6, 7, 0, time.UTC)

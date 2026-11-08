@@ -17,7 +17,9 @@ type topicResolver struct {
 }
 
 func (r topicResolver) KeyTopics(ctx context.Context, apiKey string) (int64, []string, error) {
-	p, err := r.auth.Authenticate(ctx, apiKey)
+	// Bypass the key cache: this also runs on every revalidation pass, whose
+	// whole job is to notice keys revoked from outside the process.
+	p, err := r.auth.AuthenticateFresh(ctx, apiKey)
 	if errors.Is(err, auth.ErrInvalidKey) || errors.Is(err, auth.ErrNoCredentials) {
 		return 0, nil, stream.ErrInvalidKey
 	}

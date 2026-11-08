@@ -7,6 +7,7 @@ import (
 	"os"
 	"reflect"
 	"testing"
+	"unicode/utf8"
 )
 
 func mustParse(t testing.TB, s string) OrderedMap {
@@ -290,5 +291,45 @@ func BenchmarkOrderedMapMarshal(b *testing.B) {
 	b.ReportAllocs()
 	for range b.N {
 		buf = m.AppendJSON(buf[:0])
+	}
+}
+
+func TestOrderedMapFirstKey(t *testing.T) {
+	var m OrderedMap
+	m.Set("first", json.RawMessage(`"kept"`))
+	m.Set("second", json.RawMessage("2"))
+	if !m.Has("first") {
+		t.Error("Has misses the first key")
+	}
+	m.SetDefault("first", json.RawMessage(`"overwritten"`))
+	if got, _ := m.GetString("first"); got != "kept" {
+		t.Errorf("SetDefault replaced the first field: %s", m)
+	}
+	if m.Len() != 2 {
+		t.Errorf("SetDefault added a duplicate: %s", m)
+	}
+}
+
+// Each invalid byte becomes one U+FFFD, as encoding/json does, so the output
+// is valid UTF-8 and decodes to the same key encoding/json would produce.
+func TestOrderedMapInvalidUTF8Key(t *testing.T) {
+	var m OrderedMap
+	m.Set("a\xff\xfeb", json.RawMessage("1"))
+	out := m.AppendJSON(nil)
+	if !utf8.Valid(out) {
+		t.Fatalf("output is not valid UTF-8: %q", out)
+	}
+	var back map[string]int
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := back["a��b"]; !ok {
+		t.Errorf("got %q", out)
+	}
+	// A real U+FFFD in the input is valid and passes through unchanged.
+	var ok OrderedMap
+	ok.Set("x�y", json.RawMessage("1"))
+	if got := string(ok.AppendJSON(nil)); got != "{\"x�y\":1}" {
+		t.Errorf("got %q", got)
 	}
 }

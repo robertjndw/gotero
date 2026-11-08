@@ -26,6 +26,20 @@ func (f *fakeFiles) PutBlob(_ context.Context, b repo.Blob) error {
 	return nil
 }
 
+func (f *fakeFiles) LockBlob(ctx context.Context, md5 string, fn func(repo.BlobTx) error) error {
+	return fn(fakeBlobTx{f: f, md5: md5})
+}
+
+type fakeBlobTx struct {
+	repo.BlobTx
+	f   *fakeFiles
+	md5 string
+}
+
+func (t fakeBlobTx) Put(ctx context.Context, size int64) error {
+	return t.f.PutBlob(ctx, repo.Blob{MD5: t.md5, Size: size})
+}
+
 func newService(t *testing.T) (*Service, *fakeFiles, storage.Backend) {
 	t.Helper()
 	b, err := local.New(t.TempDir())

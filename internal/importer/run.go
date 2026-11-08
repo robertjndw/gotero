@@ -19,8 +19,13 @@ import (
 	"github.com/robertjndw/gotero/zoteroclient"
 )
 
-// errCancelled means the user cancelled the job; its status is already set.
-var errCancelled = errors.New("importer: job cancelled")
+// errCancelled means the run no longer holds the job: the user cancelled it,
+// or its lease expired and another worker took over. Either way the job's
+// status is no longer this run's to set.
+var errCancelled = errors.New("importer: job cancelled or taken over")
+
+var errNoNotesAccess = errors.New("the API key cannot read your notes. Create a key with notes access, " +
+	"otherwise every note would be left out of the import")
 
 // Phases of one library, in order. A saved cursor resumes at its phase; the
 // phases themselves are idempotent, so repeating a half-done one is cheap.
@@ -54,8 +59,7 @@ type libState struct {
 	Name    string `json:"name"`
 	Phase   string `json:"phase"`
 	Pass    int    `json:"pass"`
-	// LMV is the highest Last-Modified-Version seen on zotero.org. The gotero
-	// library is raised to it when the library is done.
+	// LMV is the highest Last-Modified-Version seen on zotero.org.
 	LMV   int64  `json:"lmv"`
 	Done  bool   `json:"done"`
 	Error string `json:"error,omitempty"`
@@ -63,6 +67,27 @@ type libState struct {
 	// the middle of a fresh import resumes as a fresh import even though the
 	// library is no longer empty by then.
 	Mode string `json:"mode,omitempty"`
+
+	// zotero.org can change while it is being read. All of this lives in the
+	// cursor, because a resumed job that forgot about a change would adopt a
+	// library version whose changes it never copied.
+	//
+	// PassStart is the first source version a response carried in the
+	// current pass, and Drift says a later response carried another one.
+	PassStart int64 `json:"passStart,omitempty"`
+	Drift     bool  `json:"drift,omitempty"`
+	// Listed is, per phase, the source version its listing was taken at in
+	// this pass. Since is, per phase, the version a catch-up pass lists
+	// changes from: what the previous pass listed at.
+	Listed map[string]int64 `json:"listed,omitempty"`
+	Since  map[string]int64 `json:"since,omitempty"`
+	// Copied is the source version every phase is known to be complete up
+	// to. A fresh import raises the gotero library to it and no further.
+	Copied int64 `json:"copied,omitempty"`
+	// Local is the gotero library version after the importer's last write
+	// in fresh mode. A later job compares it with the current version to
+	// know that nothing else wrote to the library in between.
+	Local int64 `json:"local,omitempty"`
 	// Conflicts counts, per phase, objects left alone because they changed in
 	// gotero after the importer wrote them.
 	Conflicts map[string]int64 `json:"conflicts,omitempty"`
@@ -80,6 +105,8 @@ type libState struct {
 type cursor struct {
 	Libs       []*libState `json:"libs"`
 	Discovered bool        `json:"discovered"`
+	// Source is the zotero.org user ID the key belongs to.
+	Source int64 `json:"source,omitempty"`
 }
 
 // run is the state of one job being processed.
@@ -87,6 +114,9 @@ type run struct {
 	w   *Worker
 	job repo.ImportJob
 	log *slog.Logger
+	// token is the lease this run holds on the job. Every write to the job
+	// names it, so a run that lost the lease cannot write anymore.
+	token string
 
 	client     *zoteroclient.Client
 	user       repo.User
@@ -109,8 +139,8 @@ type run struct {
 	quotaSet bool
 }
 
-func newRun(w *Worker, job repo.ImportJob, log *slog.Logger) *run {
-	return &run{w: w, job: job, log: log}
+func newRun(w *Worker, job repo.ImportJob, token string, log *slog.Logger) *run {
+	return &run{w: w, job: job, token: token, log: log}
 }
 
 // update mutates shared state under the lock.
@@ -148,6 +178,11 @@ func (r *run) execute(ctx context.Context) (string, error) {
 	if !info.Access.User.Library {
 		return "", errors.New("the API key cannot read your library. Create a key with library access")
 	}
+	if !info.Access.User.Notes {
+		// zotero.org leaves notes out of every listing for such a key, so the
+		// import would look complete while missing them.
+		return "", errNoNotesAccess
+	}
 	r.userID = info.UserID
 	r.fileAccess = r.job.IncludeFiles
 	if r.job.IncludeFiles && !info.Access.User.Files {
@@ -169,6 +204,7 @@ func (r *run) execute(ctx context.Context) (string, error) {
 		r.cur.Libs = []*libState{{ID: "user", Name: "My Library"}}
 		r.cur.Discovered = false
 	}
+	r.cur.Source = r.userID
 	if r.job.IncludeGroups && !r.cur.Discovered {
 		if err := r.discoverGroups(ctx, info); err != nil {
 			return "", err
@@ -237,6 +273,9 @@ func (r *run) summary() string {
 		parts = append(parts, fmt.Sprintf("%d objects from zotero.org were skipped because their data was invalid.", r.skipped))
 	}
 	for _, st := range r.cur.Libs {
+		if st.Done && st.Drift {
+			parts = append(parts, st.Name+": "+driftMessage(st.Copied))
+		}
 		if n := sum(st.Conflicts); n > 0 {
 			parts = append(parts, st.Name+": "+conflictMessage(n))
 		}
@@ -245,6 +284,13 @@ func (r *run) summary() string {
 		}
 	}
 	return strings.Join(parts, " ")
+}
+
+// driftMessage is the per-library warning for a source that kept changing
+// through every pass.
+func driftMessage(copied int64) string {
+	return fmt.Sprintf("the library kept changing on zotero.org during the import, so changes made there after "+
+		"library version %d may be missing. Run the import again once nothing is syncing with zotero.org.", copied)
 }
 
 // conflictMessage is the per-library warning for objects the importer kept.
@@ -291,7 +337,7 @@ func (r *run) checkpoint(ctx context.Context, force bool) error {
 	cur, prog := r.snapshot()
 	r.mu.Unlock()
 
-	ok, err := r.w.Store.Imports().SaveProgress(ctx, r.job.ID, cur, prog)
+	ok, err := r.w.Store.Imports().SaveProgress(ctx, r.job.ID, r.token, cur, prog)
 	if err != nil {
 		return fmt.Errorf("save import progress: %w", err)
 	}

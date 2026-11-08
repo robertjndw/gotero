@@ -6,11 +6,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/robertjndw/gotero/internal/importer"
+	"github.com/robertjndw/gotero/internal/repo"
 )
 
 func TestImportJobs(t *testing.T) {
@@ -77,7 +79,7 @@ func TestImportProgressIsReported(t *testing.T) {
 }
 
 // fakeZoteroOrg answers keys/current like zotero.org does.
-func fakeZoteroOrg(t *testing.T, library bool) *httptest.Server {
+func fakeZoteroOrg(t *testing.T, library, notes bool) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/keys/current" || r.Header.Get("Zotero-API-Key") != "GoodKeyGoodKeyGoodKey1234" {
@@ -85,14 +87,14 @@ func fakeZoteroOrg(t *testing.T, library bool) *httptest.Server {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprintf(w, `{"key":"x","userID":1,"username":"u","displayName":"U","access":{"user":{"library":%t,"files":true},"groups":{}}}`, library)
+		_, _ = fmt.Fprintf(w, `{"key":"x","userID":1,"username":"u","displayName":"U","access":{"user":{"library":%t,"notes":%t,"files":true},"groups":{}}}`, library, notes)
 	}))
 	t.Cleanup(srv.Close)
 	return srv
 }
 
 func TestImportKeyIsCheckedAgainstZoteroOrg(t *testing.T) {
-	zo := fakeZoteroOrg(t, true)
+	zo := fakeZoteroOrg(t, true, true)
 	e := newEnv(t, envOpts{validator: importer.New(importer.Deps{BaseURL: zo.URL + "/"})})
 	e.user("alice")
 	c := e.login("alice", "password-alice")
@@ -114,7 +116,7 @@ func TestImportKeyIsCheckedAgainstZoteroOrg(t *testing.T) {
 }
 
 func TestImportKeyNeedsLibraryAccess(t *testing.T) {
-	zo := fakeZoteroOrg(t, false)
+	zo := fakeZoteroOrg(t, false, true)
 	e := newEnv(t, envOpts{validator: importer.New(importer.Deps{BaseURL: zo.URL + "/"})})
 	e.user("alice")
 	c := e.login("alice", "password-alice")
@@ -123,8 +125,55 @@ func TestImportKeyNeedsLibraryAccess(t *testing.T) {
 	assert.Contains(t, res.fields(), "apiKey")
 }
 
+func TestImportKeyNeedsNotesAccess(t *testing.T) {
+	zo := fakeZoteroOrg(t, true, false)
+	e := newEnv(t, envOpts{validator: importer.New(importer.Deps{BaseURL: zo.URL + "/"})})
+	e.user("alice")
+	c := e.login("alice", "password-alice")
+	res := c.do("POST", "/imports", map[string]any{"apiKey": "GoodKeyGoodKeyGoodKey1234"})
+	assert.Equal(t, 422, res.status, string(res.raw))
+	assert.Contains(t, res.fields()["apiKey"], "notes")
+	assert.Empty(t, items(c.mustOK("GET", "/imports", nil)))
+}
+
+func TestImportOnlyOneActivePerUser(t *testing.T) {
+	e := newEnv(t)
+	e.user("alice")
+	c := e.login("alice", "password-alice")
+	body := map[string]any{"apiKey": "AbCdEfGh1234567890abcdEF"}
+	first := c.do("POST", "/imports", body)
+	require.Equal(t, 201, first.status, string(first.raw))
+	res := c.do("POST", "/imports", body)
+	assert.Equal(t, 409, res.status, string(res.raw))
+	assert.Contains(t, string(res.raw), "import_active")
+
+	c.mustOK("POST", fmt.Sprintf("/imports/%d/cancel", num(first.json(), "id")), nil)
+	assert.Equal(t, 201, c.do("POST", "/imports", body).status, "a new import once the old one ended")
+}
+
+// The worker finishing the job after the handler read it must win: the
+// cancel does not relabel a completed job.
+func TestCancelDoesNotOverwriteFinishedJob(t *testing.T) {
+	e := newEnv(t)
+	alice := e.user("alice")
+	c := e.login("alice", "password-alice")
+	job, err := e.store.Imports().Create(ctx(), repo.ImportJob{UserID: alice.ID, SourceAPIKey: "zotkey"})
+	require.NoError(t, err)
+	_, err = e.store.Imports().ClaimNext(ctx(), "w", time.Minute)
+	require.NoError(t, err)
+	ok, err := e.store.Imports().Finish(ctx(), job.ID, "w", "completed", "", time.Now())
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	got := c.mustOK("POST", fmt.Sprintf("/imports/%d/cancel", job.ID), nil)
+	assert.Equal(t, "completed", got["status"])
+	stored, err := e.store.Imports().Get(ctx(), job.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "completed", stored.Status)
+}
+
 func TestImportKeyCheckNetworkErrorIs502(t *testing.T) {
-	zo := fakeZoteroOrg(t, true)
+	zo := fakeZoteroOrg(t, true, true)
 	base := zo.URL + "/"
 	zo.Close()
 	e := newEnv(t, envOpts{validator: importer.New(importer.Deps{BaseURL: base})})

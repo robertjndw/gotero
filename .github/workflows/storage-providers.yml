@@ -1,0 +1,46 @@
+name: storage-providers
+
+# The storage contract suite against a real S3 provider rather than the
+# versitygw container the normal CI uses. Providers disagree in small ways
+# (multipart limits, copy and listing behaviour), and only a real bucket
+# shows them. Runs nightly once the GOTERO_S3_TEST_* secrets are configured;
+# without them it does nothing.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 4 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  s3:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GOTERO_S3_TEST_ENDPOINT: ${{ secrets.GOTERO_S3_TEST_ENDPOINT }}
+      GOTERO_S3_TEST_REGION: ${{ secrets.GOTERO_S3_TEST_REGION }}
+      GOTERO_S3_TEST_BUCKET: ${{ secrets.GOTERO_S3_TEST_BUCKET }}
+      GOTERO_S3_TEST_ACCESS_KEY: ${{ secrets.GOTERO_S3_TEST_ACCESS_KEY }}
+      GOTERO_S3_TEST_SECRET_KEY: ${{ secrets.GOTERO_S3_TEST_SECRET_KEY }}
+    steps:
+      - name: skip without credentials
+        id: creds
+        run: |
+          if [ -z "$GOTERO_S3_TEST_ENDPOINT" ]; then
+            echo "GOTERO_S3_TEST_* secrets are not set; nothing to test." >> "$GITHUB_STEP_SUMMARY"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v5
+        if: steps.creds.outputs.run == 'true'
+      - uses: actions/setup-go@v6
+        if: steps.creds.outputs.run == 'true'
+        with:
+          go-version-file: go.work
+          cache-dependency-path: "**/go.sum"
+      - name: storage contract suite
+        if: steps.creds.outputs.run == 'true'
+        working-directory: storage
+        run: go test -count=1 -v -timeout 25m ./s3/...

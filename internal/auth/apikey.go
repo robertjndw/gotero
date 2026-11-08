@@ -51,6 +51,9 @@ type Authenticator struct {
 
 	mu    sync.Mutex
 	cache map[string]cachedPrincipal // by string(hash)
+	// gen is bumped by every invalidation. A lookup that started before a bump
+	// may hold a revoked key or disabled user, so it must not populate the cache.
+	gen uint64
 }
 
 type cachedPrincipal struct {
@@ -69,6 +72,18 @@ func NewAuthenticator(keys repo.KeyRepo, users repo.UserRepo) *Authenticator {
 // Authenticate looks up raw. It returns ErrInvalidKey for unknown keys and
 // keys of disabled users.
 func (a *Authenticator) Authenticate(ctx context.Context, raw string) (Principal, error) {
+	return a.authenticate(ctx, raw, true)
+}
+
+// AuthenticateFresh is Authenticate without trusting the cache. Callers that
+// exist to notice revocations made outside this process, such as stream
+// revalidation, need it: a cached answer can be up to the cache TTL stale,
+// which would stack on top of their own polling interval.
+func (a *Authenticator) AuthenticateFresh(ctx context.Context, raw string) (Principal, error) {
+	return a.authenticate(ctx, raw, false)
+}
+
+func (a *Authenticator) authenticate(ctx context.Context, raw string, useCache bool) (Principal, error) {
 	if raw == "" {
 		return Principal{}, ErrNoCredentials
 	}
@@ -79,11 +94,12 @@ func (a *Authenticator) Authenticate(ctx context.Context, raw string) (Principal
 	hash := HashToken(raw)
 	now := a.now()
 	a.mu.Lock()
-	if c, ok := a.cache[string(hash)]; ok && now.Before(c.expires) {
+	if c, ok := a.cache[string(hash)]; ok && useCache && now.Before(c.expires) {
 		a.mu.Unlock()
 		c.p.Raw = raw
 		return c.p, nil
 	}
+	gen := a.gen
 	a.mu.Unlock()
 
 	key, err := a.keys.GetByHash(ctx, hash)
@@ -107,10 +123,12 @@ func (a *Authenticator) Authenticate(ctx context.Context, raw string) (Principal
 
 	p := Principal{Key: key, User: user, Raw: raw}
 	a.mu.Lock()
-	if len(a.cache) >= maxCacheEntries {
-		clear(a.cache)
+	if a.gen == gen {
+		if len(a.cache) >= maxCacheEntries {
+			clear(a.cache)
+		}
+		a.cache[string(hash)] = cachedPrincipal{p: p, expires: now.Add(a.ttl)}
 	}
-	a.cache[string(hash)] = cachedPrincipal{p: p, expires: now.Add(a.ttl)}
 	a.mu.Unlock()
 	return p, nil
 }
@@ -118,6 +136,7 @@ func (a *Authenticator) Authenticate(ctx context.Context, raw string) (Principal
 // Invalidate drops a cached key, by its hash.
 func (a *Authenticator) Invalidate(hash []byte) {
 	a.mu.Lock()
+	a.gen++
 	delete(a.cache, string(hash))
 	a.mu.Unlock()
 }
@@ -126,6 +145,7 @@ func (a *Authenticator) Invalidate(hash []byte) {
 // account, changing the password or deleting it.
 func (a *Authenticator) InvalidateUser(userID int64) {
 	a.mu.Lock()
+	a.gen++
 	for k, c := range a.cache {
 		if c.p.User.ID == userID {
 			delete(a.cache, k)

@@ -101,6 +101,13 @@ func (a *API) uploadTarget(c *gin.Context) {
 		Fail(c, http.StatusBadRequest, "Uploaded file does not match the announced md5 or size")
 	case err != nil && track.err != nil:
 		a.uploadReadFailed(c, track.err)
+	case errors.Is(err, files.ErrStorageFull):
+		// 507 rather than 503: retrying in a few seconds will not help, and
+		// a busy answer would hide that an operator has to free space. It is
+		// still a 5xx, so Zotero keeps the file queued and tries again on a
+		// later sync. Logged as an error because nothing else will page.
+		a.log.ErrorContext(ctx, "zapi: file storage is full, upload refused", "md5", tok.MD5, "size", tok.Size, "err", err)
+		Fail(c, http.StatusInsufficientStorage, "Server storage is full")
 	case err != nil:
 		a.FailErr(c, err)
 	default:

@@ -72,6 +72,11 @@ There are several layers of tests:
 | Layer | Command | What it proves |
 |---|---|---|
 | Unit and integration | `make test` | Every package, against real PostgreSQL, S3 (versitygw) and WebDAV containers, with the race detector |
+| Authorization matrix | part of `make test` (`TestAuthzMatrix` in `internal/server`) | Every registered route, called as every kind of principal (other users, restricted keys, group roles, sessions without CSRF), denies what it must without leaking or changing data. A new route fails the test until it is classified |
+| Fault injection | part of `make test` (`internal/faultstore`, `internal/faultdb`) | Storage that fails, times out or fills up mid-upload, and database connections killed mid-transaction, never corrupt a library, lose a committed file or leave bytes behind for good |
+| Migrations | part of `make test` (`TestMigrationsRollBackCleanly`) | Every migration's Down restores exactly the schema before it, and the chain upgrades again afterwards |
+| Web UI | `pnpm test:e2e` in `web/` against a running server | The built UI in a real browser against the real API: login, invites, API keys, password changes, groups, logout |
+| Real S3 providers | `GOTERO_S3_TEST_ENDPOINT=... go test ./s3/...` in `storage/` | The storage contract suite against a real bucket, nightly once its secrets are set |
 | Fuzzing | `scripts/fuzz.sh 30s` | Parsers and protocol messages never panic or misbehave on hostile input |
 | Conformance kit | see below | gotero answers every protocol request the way Zotero expects: 128 tests across auth, groups, writes, reads, deletions, settings, tags, full text, files, streaming, login sessions and known quirks |
 | Multi-client simulation | part of `make test` | Several simulated Zotero clients edit one library concurrently, over a network that loses requests and responses and through server crashes, and still converge without losing an acknowledged write (see below) |

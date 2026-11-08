@@ -154,3 +154,66 @@ func TestGuardFullTableStillAdmitsNewSources(t *testing.T) {
 		t.Fatalf("table grew to %d keys", n)
 	}
 }
+
+// A correct password refunds only its own reservation. If it wiped the IP
+// counter, an attacker holding one valid account could interleave its logins
+// with guesses against others and never run out of IP budget.
+func TestGuardSuccessKeepsEarlierIPFailures(t *testing.T) {
+	g := NewLoginGuard(1)
+	const ip = "192.0.2.80"
+	for i := range 3 {
+		if _, ok := g.Attempt("victim"+strconv.Itoa(i), ip); !ok {
+			t.Fatal("attempt refused early")
+		}
+	}
+	if _, ok := g.Attempt("mallory", ip); !ok {
+		t.Fatal("attempt refused early")
+	}
+	g.Succeeded("mallory", ip)
+
+	allowed := 0
+	for i := range maxIPAttempts {
+		if _, ok := g.Attempt("other"+strconv.Itoa(i), ip); ok {
+			allowed++
+		}
+	}
+	if want := maxIPAttempts - 3; allowed != want {
+		t.Fatalf("after 3 failures and a success the IP had %d attempts left, want %d", allowed, want)
+	}
+}
+
+// A login can take longer than the sweep interval, so by the time it
+// succeeds its counters may already be gone.
+func TestGuardSucceededAfterCountersExpired(t *testing.T) {
+	g := NewLoginGuard(1)
+	now := time.Unix(0, 0)
+	g.SetClock(func() time.Time { return now })
+	g.Attempt("bob", "2001:db8::1")
+	now = now.Add(attemptWindow + time.Minute)
+	g.Attempt("carol", "198.51.100.1") // sweeps bob's expired counters
+	if _, ok := g.attempts["ip:2001:db8::/64"]; ok {
+		t.Fatal("test setup: counter was not swept")
+	}
+	g.Succeeded("bob", "2001:db8::1")
+	g.Succeeded("nobody", "203.0.113.1")
+}
+
+// Eviction must make room one key at a time. Dropping everything at once
+// would hand every source a fresh budget whenever the table fills up.
+func TestGuardEvictionDropsOnlyWhatIsNeeded(t *testing.T) {
+	g := NewLoginGuard(1)
+	// The source's IP counter already exists, so only the pair counter is new.
+	g.attempts["ip:203.0.113.50"] = []time.Time{g.now()}
+	for i := range maxGuardKeys - 1 {
+		g.attempts["ip:spray"+strconv.Itoa(i)] = []time.Time{g.now()}
+	}
+	if _, ok := g.Attempt("alice", "203.0.113.50"); !ok {
+		t.Fatal("a new pair was refused because the table was full")
+	}
+	if n := len(g.attempts); n != maxGuardKeys {
+		t.Fatalf("table has %d keys after one eviction, want %d", n, maxGuardKeys)
+	}
+	if n := len(g.attempts["ip:203.0.113.50"]); n != 2 {
+		t.Fatalf("the attempt's own IP counter has %d entries, want 2", n)
+	}
+}

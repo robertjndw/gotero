@@ -28,8 +28,25 @@ jobs:
         with:
           version: v2.12
           working-directory: ${{ matrix.module }}
+      # -coverpkg counts code exercised from other packages' tests too;
+      # without it, code that is only driven from a neighbouring package (GC
+      # through the jobs tests, say) reports as untested.
       - name: test
-        run: go test -race -coverprofile=coverage.out ./...
+        run: go test -race -coverpkg=./... -coverprofile=coverage.out ./...
+      # Floors sit a couple of points under the measured totals, so they
+      # catch untested code piling up without failing on noise. conformance
+      # has none: its suites run against a live server in conformance.yml.
+      - name: coverage
+        env:
+          MODULE: ${{ matrix.module }}
+          MIN_COVERAGE: ${{ fromJSON('{".":"75","zotero":"73","zoteroclient":"81","storage":"76","conformance":"0"}')[matrix.module] }}
+        run: |
+          total="$(go tool cover -func=coverage.out | awk '/^total:/ {sub("%", "", $NF); print $NF}')"
+          echo "### Coverage for \`$MODULE\`: ${total}%" >> "$GITHUB_STEP_SUMMARY"
+          if awk -v t="$total" -v m="$MIN_COVERAGE" 'BEGIN { exit !(t < m) }'; then
+            echo "coverage ${total}% fell below the floor of ${MIN_COVERAGE}%" >&2
+            exit 1
+          fi
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
       - name: library builds without the workspace

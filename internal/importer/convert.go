@@ -32,18 +32,20 @@ func convertObject(t repo.ObjectType, o zotero.Object) (repo.Object, bool) {
 	if raw, ok := m.Get("relations"); ok && strings.TrimSpace(string(raw)) == "[]" {
 		m.Set("relations", json.RawMessage("{}"))
 	}
+	// Items, collections and searches all carry the trash flag since Zotero
+	// 7. The API write path stores it as 1 or not at all, for every type.
+	if raw, ok := m.Get("deleted"); ok {
+		switch strings.TrimSpace(string(raw)) {
+		case "true", "1":
+			m.Set("deleted", json.RawMessage("1"))
+		default:
+			m.Delete("deleted")
+		}
+	}
 	switch t {
 	case repo.TypeItem:
 		if it, _ := m.GetString("itemType"); it == "" {
 			return repo.Object{}, false
-		}
-		if raw, ok := m.Get("deleted"); ok {
-			switch strings.TrimSpace(string(raw)) {
-			case "true", "1":
-				m.Set("deleted", json.RawMessage("1"))
-			default:
-				m.Delete("deleted")
-			}
 		}
 		if raw, ok := m.Get("parentItem"); ok && strings.TrimSpace(string(raw)) == "false" {
 			m.Delete("parentItem")
