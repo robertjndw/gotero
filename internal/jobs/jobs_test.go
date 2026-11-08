@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/robertjndw/gotero/internal/files"
 	"github.com/robertjndw/gotero/internal/repo"
 	"github.com/robertjndw/gotero/internal/repo/pg"
@@ -29,6 +31,7 @@ type env struct {
 	be    storage.Backend
 	run   *Runner
 	lib   int64
+	pool  *pgxpool.Pool
 	exec  func(sql string, args ...any)
 }
 
@@ -46,7 +49,7 @@ func setup(t *testing.T) *env {
 		t.Fatal(err)
 	}
 	return &env{
-		store: store, fs: fs, be: be, lib: u.LibraryID,
+		store: store, fs: fs, be: be, lib: u.LibraryID, pool: pool,
 		run: New(store, fs, slog.New(slog.NewTextHandler(io.Discard, nil)), 0),
 		exec: func(sql string, args ...any) {
 			if _, err := pool.Exec(context.Background(), sql, args...); err != nil {

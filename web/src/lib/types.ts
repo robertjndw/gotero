@@ -143,5 +143,5 @@ export type Setup = {
   providers: SsoProvider[]
 }
 export type AdminSettings = { openRegistration: boolean; defaultQuotaBytes: number | null }
-export type GcResult = { orphanBlobs: number; orphanBytes: number; deleted: boolean }
+export type GcResult = { orphanBlobs: number; orphanBytes: number; deleted: boolean; failed?: number }
 export type Page<T> = { items: T[]; nextCursor: string | null }

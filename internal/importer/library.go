@@ -3,6 +3,7 @@ package importer
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -23,10 +24,6 @@ type lib struct {
 	st  *libState
 	src *zoteroclient.Library
 	id  int64 // gotero library ID
-	// lmvFirst and drift detect a source library that changed while we read it.
-	lmvFirst int64
-	seen     bool
-	drift    bool
 	// fresh is true while importing into a library that was empty when the
 	// import began.
 	fresh bool
@@ -45,14 +42,60 @@ func (r *run) addConflicts(l *lib, phase string, n int64) {
 	})
 }
 
-// observe records the library version a response carried.
+// observe records the library version a response carried. Any response of a
+// pass carrying another version than the first means the phases did not all
+// see the same library.
 func (l *lib) observe(r *run, v int64) {
-	r.update(func() { l.st.LMV = max(l.st.LMV, v) })
-	if !l.seen {
-		l.lmvFirst, l.seen = v, true
-	} else if v != l.lmvFirst {
-		l.drift = true
+	if v <= 0 {
+		return
 	}
+	r.update(func() {
+		st := l.st
+		st.LMV = max(st.LMV, v)
+		if st.PassStart == 0 {
+			st.PassStart = v
+		} else if v != st.PassStart {
+			st.Drift = true
+		}
+	})
+}
+
+// listed records the version a phase's listing was taken at.
+func (l *lib) listed(r *run, phase string, v int64) {
+	l.observe(r, v)
+	r.update(func() {
+		if l.st.Listed == nil {
+			l.st.Listed = map[string]int64{}
+		}
+		l.st.Listed[phase] = v
+	})
+}
+
+// lowWater is the source version every phase of the last pass is complete
+// up to: each phase holds everything its listing showed, so the oldest
+// listing bounds them all.
+func lowWater(st *libState) int64 {
+	low := int64(-1)
+	for _, v := range st.Listed {
+		if low < 0 || v < low {
+			low = v
+		}
+	}
+	if low < 0 {
+		// A cursor written before phases recorded their listing.
+		return st.LMV
+	}
+	return low
+}
+
+// write runs fn in a library transaction. In fresh mode it remembers the
+// version the library ended up at, see libState.Local.
+func (r *run) write(ctx context.Context, l *lib, fn func(tx repo.LibraryTx) error) (int64, error) {
+	v, err := r.w.Store.InLibrary(ctx, l.id, fn)
+	if err == nil && l.fresh {
+		r.update(func() { l.st.Local = max(l.st.Local, v) })
+	}
+	return v, err
 }
 
 func (r *run) importLibrary(ctx context.Context, st *libState) error {
@@ -84,6 +127,10 @@ func (r *run) importLibrary(ctx context.Context, st *libState) error {
 		mode := modeMerge
 		if rd.Version() == 0 {
 			mode = modeFresh
+		} else if fresh, err := r.continuesFresh(ctx, st.ID, rd.Version()); err != nil {
+			return err
+		} else if fresh {
+			mode = modeFresh
 		}
 		r.update(func() { st.Mode = mode })
 		// Saved before the first write: after a crash the library is no
@@ -98,23 +145,41 @@ func (r *run) importLibrary(ctx context.Context, st *libState) error {
 		if err := r.runPhases(ctx, l); err != nil {
 			return err
 		}
-		// A change on zotero.org mid-read means the phases saw different
-		// library states. The diff makes another pass cheap.
-		if !l.drift || st.Pass+1 >= maxPasses {
+		if !st.Drift {
+			// Every response of the pass carried the same version, so the
+			// library was copied as it stood at that version.
+			r.update(func() { st.Copied = max(st.PassStart, lowWater(st)) })
 			break
 		}
-		r.update(func() { st.Pass++; st.Phase = phaseCollections })
-		l.seen, l.drift = false, false
+		if st.Pass+1 >= maxPasses {
+			// Still changing. Only what every phase saw counts as copied;
+			// summary() turns the persisted Drift into a warning.
+			r.log.WarnContext(ctx, "importer: source kept changing", "library", st.ID, "copied", lowWater(st), "lmv", st.LMV)
+			r.update(func() { st.Copied = lowWater(st) })
+			break
+		}
+		// A catch-up pass asks each phase only for what changed after its
+		// own listing, which also catches a change to a phase that was
+		// already done when the change was noticed.
+		r.update(func() {
+			st.Pass++
+			st.Phase = phaseCollections
+			st.Since, st.Listed = st.Listed, nil
+			st.PassStart, st.Drift = 0, false
+		})
+		if err := r.checkpoint(ctx, true); err != nil {
+			return err
+		}
 	}
 
 	if err := r.syncFiles(ctx, l); err != nil {
 		return err
 	}
-	v, err := r.w.Store.InLibrary(ctx, l.id, func(tx repo.LibraryTx) error {
+	v, err := r.write(ctx, l, func(tx repo.LibraryTx) error {
 		// Only a fresh import adopts the source version. Elsewhere it would
 		// just open a gap, and objects already carry versions of their own.
 		if l.fresh {
-			return tx.RaiseVersion(ctx, st.LMV)
+			return tx.RaiseVersion(ctx, st.Copied)
 		}
 		return nil
 	})
@@ -135,6 +200,38 @@ func (r *run) importLibrary(ctx context.Context, st *libState) error {
 		r.w.Publisher.Publish(zapi.Event{Topic: topic, Version: v})
 	}
 	return nil
+}
+
+// continuesFresh reports whether a library that is no longer empty may still
+// be imported in fresh mode, because the content is all from an earlier fresh
+// import of the same zotero.org account that did not get to the end: it
+// failed, was cancelled, or the source kept changing. Without this, one
+// transient error would turn every rerun into a merge, and the library would
+// never get zotero.org's versions. The library version must still be the one
+// that import left behind, or something else wrote to it in between.
+func (r *run) continuesFresh(ctx context.Context, libID string, version int64) (bool, error) {
+	jobs, err := r.w.Store.Imports().ListByUser(ctx, r.job.UserID)
+	if err != nil {
+		return false, err
+	}
+	for _, j := range jobs {
+		if j.ID >= r.job.ID || len(j.Cursor) == 0 {
+			continue
+		}
+		var c cursor
+		if json.Unmarshal(j.Cursor, &c) != nil {
+			continue
+		}
+		for _, st := range c.Libs {
+			if st.ID != libID {
+				continue
+			}
+			// The newest earlier job that touched the library decides.
+			return c.Source == r.userID && st.Mode == modeFresh && (!st.Done || st.Drift) &&
+				st.Local == version, nil
+		}
+	}
+	return false, nil
 }
 
 // runPhases runs the metadata phases from the saved one onwards.
@@ -246,17 +343,30 @@ func (r *run) localVersions(ctx context.Context, libID int64, t repo.ObjectType)
 
 func zType(t repo.ObjectType) zotero.ObjectType { return zotero.ObjectType(t) }
 
+// listVersions is Versions with a 304 for an unchanged library read as an
+// empty answer. It only happens with since > 0.
+func listVersions(ctx context.Context, src *zoteroclient.Library, t repo.ObjectType, q zoteroclient.VersionsQuery) (map[string]int64, int64, error) {
+	out, v, err := src.Versions(ctx, zType(t), q)
+	if zoteroclient.IsNotModified(err) {
+		return map[string]int64{}, v, nil
+	}
+	return out, v, err
+}
+
 // syncObjects brings collections, searches or items up to date.
 func (r *run) syncObjects(ctx context.Context, l *lib, t repo.ObjectType) error {
 	phase := string(t) + "s"
 	if t == repo.TypeSearch {
 		phase = phaseSearches
 	}
-	remote, lmv, err := l.src.Versions(ctx, zType(t), zoteroclient.VersionsQuery{IncludeTrashed: t == repo.TypeItem})
+	since := l.st.Since[phase]
+	// Collections and searches can sit in the trash since Zotero 7 too, and
+	// a library copy without them would lose the trash.
+	remote, lmv, err := listVersions(ctx, l.src, t, zoteroclient.VersionsQuery{Since: since, IncludeTrashed: true})
 	if err != nil {
 		return err
 	}
-	l.observe(r, lmv)
+	l.listed(r, phase, lmv)
 	local, err := r.localVersions(ctx, l.id, t)
 	if err != nil {
 		return err
@@ -275,6 +385,7 @@ func (r *run) syncObjects(ctx context.Context, l *lib, t repo.ObjectType) error 
 		}
 	}
 	var need []string
+	var added int64
 	for k, v := range remote {
 		if l.fresh {
 			if local[k] != v {
@@ -283,19 +394,31 @@ func (r *run) syncObjects(ctx context.Context, l *lib, t repo.ObjectType) error 
 		} else if rec, ok := imported[k]; !ok || rec.SourceVersion != v {
 			need = append(need, k)
 		}
+		if _, ok := local[k]; !ok {
+			added++
+		}
 	}
 	slices.Sort(need)
 	r.update(func() {
 		if l.st.Total == nil {
 			l.st.Total, l.st.Finished = map[string]int64{}, map[string]int64{}
 		}
-		l.st.Total[phase] = int64(len(remote))
-		l.st.Finished[phase] = int64(len(remote) - len(need))
+		if since == 0 {
+			l.st.Total[phase] = int64(len(remote))
+			l.st.Finished[phase] = int64(len(remote) - len(need))
+			return
+		}
+		// A catch-up pass lists only what changed. Changed objects were
+		// counted by the earlier pass already, so only new ones add to the
+		// total, and the changed ones count as done again once written.
+		changed := max(0, int64(len(need))-added)
+		l.st.Total[phase] += added
+		l.st.Finished[phase] = max(0, l.st.Finished[phase]-changed)
 	})
 
 	if t == repo.TypeItem {
 		// Parents first: top-level items, then their children.
-		tops, v, err := l.src.Versions(ctx, zType(t), zoteroclient.VersionsQuery{Top: true, IncludeTrashed: true})
+		tops, v, err := listVersions(ctx, l.src, t, zoteroclient.VersionsQuery{Since: since, Top: true, IncludeTrashed: true})
 		if err != nil {
 			return err
 		}
@@ -314,12 +437,18 @@ func (r *run) syncObjects(ctx context.Context, l *lib, t repo.ObjectType) error 
 	}
 
 	for chunk := range slices.Chunk(need, batchSize) {
-		objs, _, err := l.src.Objects(ctx, zType(t), chunk)
+		objs, v, err := l.src.Objects(ctx, zType(t), chunk)
 		if errors.Is(err, zoteroclient.ErrLibraryChanged) {
-			l.drift = true
+			// Part of the chunk is missing, so this phase is not complete
+			// up to its listing. Listing from the old point again in the
+			// next pass picks the rest up.
+			r.update(func() { l.st.Drift, l.st.Listed[phase] = true, since })
 		} else if err != nil {
 			return err
 		}
+		// An object changed after the listing comes back newer than listed,
+		// which is a drift just like a newer listing.
+		l.observe(r, v)
 		if t == repo.TypeCollection {
 			objs = sortCollections(objs)
 		}
@@ -389,7 +518,7 @@ func (r *run) putObjects(ctx context.Context, l *lib, t repo.ObjectType, in []zo
 	if len(objs) == 0 {
 		return int64(len(in)), 0, nil
 	}
-	_, err = r.w.Store.InLibrary(ctx, l.id, func(tx repo.LibraryTx) error {
+	_, err = r.write(ctx, l, func(tx repo.LibraryTx) error {
 		conflicts = 0
 		write := objs
 		var stored map[string]repo.Object

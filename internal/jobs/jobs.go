@@ -5,8 +5,10 @@ package jobs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -22,6 +24,8 @@ const (
 	// StagingGrace is how old an abandoned staging object must be before it
 	// is removed; long uploads over slow links must not be cut off.
 	StagingGrace = 24 * time.Hour
+	// BlobGCTimeout bounds removing one orphan, storage round trip included.
+	BlobGCTimeout = 2 * time.Minute
 )
 
 // GCResult describes one garbage collection pass.
@@ -30,6 +34,8 @@ type GCResult struct {
 	OrphanBytes  int64
 	StagingFiles int
 	Deleted      bool
+	// Failed counts orphans whose removal failed; they are retried next pass.
+	Failed int64
 }
 
 // Runner owns the maintenance loops.
@@ -40,6 +46,7 @@ type Runner struct {
 	now   func() time.Time
 	// keepDeleted is the delete-log retention; <= 0 keeps the log forever.
 	keepDeleted time.Duration
+	blobTimeout time.Duration
 
 	// gcMu keeps a manual GC from the admin UI and the scheduled one from
 	// running at the same time.
@@ -47,7 +54,10 @@ type Runner struct {
 }
 
 func New(store repo.Store, files *files.Service, log *slog.Logger, keepDeleted time.Duration) *Runner {
-	return &Runner{store: store, files: files, log: log, now: time.Now, keepDeleted: keepDeleted}
+	return &Runner{
+		store: store, files: files, log: log, now: time.Now, keepDeleted: keepDeleted,
+		blobTimeout: BlobGCTimeout,
+	}
 }
 
 // Run blocks until ctx is cancelled.
@@ -66,7 +76,7 @@ func (r *Runner) Run(ctx context.Context) {
 					return
 				case <-time.After(wait):
 				}
-				if err := fn(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				if err := r.runOnce(ctx, name, fn); err != nil && !errors.Is(err, context.Canceled) {
 					r.log.Error("maintenance job failed", "job", name, "err", err)
 				}
 			}
@@ -78,6 +88,19 @@ func (r *Runner) Run(ctx context.Context) {
 		return err
 	})
 	wg.Wait()
+}
+
+// runOnce turns a panic in one run of a job into an error, so a bug in
+// maintenance takes down that run rather than the whole server, and the next
+// tick tries again.
+func (r *Runner) runOnce(ctx context.Context, name string, fn func(context.Context) error) (err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			r.log.Error("maintenance job panicked", "job", name, "panic", p, "stack", string(debug.Stack()))
+			err = fmt.Errorf("job %s panicked: %v", name, p)
+		}
+	}()
+	return fn(ctx)
 }
 
 // Prune removes expired sessions and tokens, and delete-log entries older
@@ -115,13 +138,24 @@ func (r *Runner) GC(ctx context.Context, dryRun bool) (GCResult, error) {
 		res.OrphanBlobs++
 		res.OrphanBytes += b.Size
 	}
+	var errs []error
 	if !dryRun {
 		res.OrphanBlobs, res.OrphanBytes = 0, 0
 		cutoff := r.now().Add(-OrphanGrace)
 		for _, b := range victims {
-			removed, err := r.files.RemoveOrphan(ctx, b.MD5, cutoff)
+			if ctx.Err() != nil {
+				return res, ctx.Err()
+			}
+			// One unreachable or broken object must not stop the rest of the
+			// sweep. A failed blob keeps its row, so the next pass retries it.
+			removed, err := r.removeOrphan(ctx, b.MD5, cutoff)
 			if err != nil {
-				return res, err
+				res.Failed++
+				if len(errs) == 0 {
+					errs = append(errs, err)
+				}
+				r.log.Warn("garbage collection: could not remove orphan blob", "md5", b.MD5, "err", err)
+				continue
 			}
 			if removed {
 				res.OrphanBlobs++
@@ -130,13 +164,26 @@ func (r *Runner) GC(ctx context.Context, dryRun bool) (GCResult, error) {
 		}
 		n, err := r.files.Backend().SweepStaging(ctx, StagingGrace)
 		if err != nil {
-			return res, err
+			errs = append(errs, fmt.Errorf("sweep staging: %w", err))
 		}
 		res.StagingFiles = n
 	}
-	if res.OrphanBlobs > 0 || res.StagingFiles > 0 {
+	if res.OrphanBlobs > 0 || res.StagingFiles > 0 || res.Failed > 0 {
 		r.log.Info("garbage collection", "dry_run", dryRun, "orphan_blobs", res.OrphanBlobs,
-			"orphan_bytes", res.OrphanBytes, "staging_files", res.StagingFiles)
+			"orphan_bytes", res.OrphanBytes, "staging_files", res.StagingFiles, "failed", res.Failed)
 	}
-	return res, nil
+	if res.Failed > 0 {
+		errs[0] = fmt.Errorf("%d orphan blobs could not be removed, first: %w", res.Failed, errs[0])
+	}
+	return res, errors.Join(errs...)
+}
+
+// removeOrphan bounds one blob's removal. RemoveOrphan keeps a database
+// connection and the blob lock while the backend deletes the bytes, and
+// uploads of the same content wait on that lock, so a hung storage request
+// must not hold them indefinitely.
+func (r *Runner) removeOrphan(ctx context.Context, md5hex string, cutoff time.Time) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, r.blobTimeout)
+	defer cancel()
+	return r.files.RemoveOrphan(ctx, md5hex, cutoff)
 }

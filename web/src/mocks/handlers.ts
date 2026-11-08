@@ -400,7 +400,7 @@ export const handlers: HttpHandler[] = [
     `${B}/admin/gc`,
     admin(async ({ request }) => {
       const { dryRun } = await body<{ dryRun: boolean }>(request)
-      return respond({ orphanBlobs: 17, orphanBytes: 84 * 1024 ** 2, deleted: !dryRun })
+      return respond({ orphanBlobs: 17, orphanBytes: 84 * 1024 ** 2, deleted: !dryRun, failed: 0 })
     }),
   ),
 

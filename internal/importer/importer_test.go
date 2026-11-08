@@ -488,18 +488,26 @@ func TestImportResumesAfterInterruption(t *testing.T) {
 	assert.EqualValues(t, src.version, e.reader(e.user.LibraryID).Version())
 }
 
-// A crash leaves the job running; the next Run picks it up again.
+// A crash leaves the job running; once its lease runs out a worker picks it
+// up again, but not before.
 func TestRunRequeuesOrphanedJobs(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
+	e.w.LeaseDuration = 300 * time.Millisecond
 	job := e.enqueue(jobOpts{})
-	claimed, err := e.store.Imports().ClaimNext(bg())
+	claimed, err := e.store.Imports().ClaimNext(bg(), "crashed", 2*time.Second)
 	require.NoError(t, err)
 	require.Equal(t, job.ID, claimed.ID)
 
 	ctx, cancel := context.WithTimeout(bg(), 30*time.Second)
 	defer cancel()
 	go e.w.Run(ctx)
+	time.Sleep(time.Second)
+	j, err := e.store.Imports().Get(bg(), job.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "running", j.Status, "a live lease is not taken away")
+	assert.Equal(t, "crashed", j.ClaimedBy)
+
 	require.Eventually(t, func() bool {
 		j, err := e.store.Imports().Get(bg(), job.ID)
 		return err == nil && j.Status == "completed"
@@ -529,11 +537,9 @@ func TestImportCancel(t *testing.T) {
 		}
 		once.Do(func() {
 			// What POST /imports/{id}/cancel does.
-			j, err := e.store.Imports().Get(bg(), job.ID)
+			ok, err := e.store.Imports().Cancel(bg(), job.ID, time.Now())
 			require.NoError(t, err)
-			now := time.Now()
-			j.Status, j.FinishedAt, j.SourceAPIKey = "cancelled", &now, ""
-			require.NoError(t, e.store.Imports().Update(bg(), j))
+			require.True(t, ok)
 			cancelled = true
 		})
 		return false

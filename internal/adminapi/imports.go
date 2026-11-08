@@ -2,6 +2,7 @@ package adminapi
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"regexp"
 	"strings"
@@ -123,12 +124,19 @@ func (a *API) createImport(c *gin.Context) error {
 		if !check.Library {
 			return invalidImportKey("That API key cannot read your library. Allow library access when you create it.")
 		}
+		if !check.Notes {
+			return invalidImportKey("That API key cannot read your notes, so they would be left out. Allow notes access when you create it.")
+		}
 		progress, _ = json.Marshal(ImportProgress{Libraries: []ImportLibrary{}, FileAccess: &check.Files})
 	}
 	job, err := a.Store.Imports().Create(c.Request.Context(), repo.ImportJob{
 		UserID: currentUser(c).ID, Status: "queued", SourceAPIKey: key,
 		IncludeGroups: in.IncludeGroups, IncludeFiles: in.IncludeFiles, Progress: progress,
 	})
+	if errors.Is(err, repo.ErrImportActive) {
+		return newErr(http.StatusConflict, "import_active",
+			"An import is already queued or running for your account. Wait for it to finish or cancel it first.")
+	}
 	if err != nil {
 		return err
 	}
@@ -170,14 +178,15 @@ func (a *API) cancelImport(c *gin.Context) error {
 	if err != nil {
 		return err
 	}
-	if j.Status == "queued" || j.Status == "running" {
-		now := a.Now()
-		j.Status, j.FinishedAt = "cancelled", &now
-		// The zotero.org key is only needed while the job runs.
-		j.SourceAPIKey = ""
-		if err := a.Store.Imports().Update(c.Request.Context(), j); err != nil {
-			return err
-		}
+	// The status read above may be stale by now: the worker can finish the
+	// job at any moment. Cancel only touches a job that is still active, and
+	// the answer shows whatever the job ended up as.
+	ctx := c.Request.Context()
+	if _, err := a.Store.Imports().Cancel(ctx, j.ID, a.Now()); err != nil {
+		return err
+	}
+	if j, err = a.Store.Imports().Get(ctx, j.ID); err != nil {
+		return err
 	}
 	c.JSON(http.StatusOK, toImportDTO(j))
 	return nil

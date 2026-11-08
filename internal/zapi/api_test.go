@@ -485,7 +485,7 @@ func TestDeleteCascades(t *testing.T) {
 	t.Run("deleting a parent deletes its children", func(t *testing.T) {
 		parent := l.create("items", m{"itemType": "book"})
 		note := l.create("items", m{"itemType": "note", "parentItem": parent})
-		att := l.create("items", m{"itemType": "attachment", "linkMode": "linked_url", "parentItem": parent})
+		att := l.create("items", m{"itemType": "attachment", "linkMode": "linked_file", "path": "/tmp/a.pdf", "parentItem": parent})
 		ann := l.create("items", m{"itemType": "annotation", "parentItem": att, "annotationType": "highlight"})
 		other := l.create("items", m{"itemType": "book"})
 		require.Equal(t, 204, l.send("DELETE", "items/"+parent, nil, "If-Unmodified-Since-Version", cur()).Status)

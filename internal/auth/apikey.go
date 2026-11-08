@@ -51,6 +51,9 @@ type Authenticator struct {
 
 	mu    sync.Mutex
 	cache map[string]cachedPrincipal // by string(hash)
+	// gen is bumped by every invalidation. A lookup that started before a bump
+	// may hold a revoked key or disabled user, so it must not populate the cache.
+	gen uint64
 }
 
 type cachedPrincipal struct {
@@ -84,6 +87,7 @@ func (a *Authenticator) Authenticate(ctx context.Context, raw string) (Principal
 		c.p.Raw = raw
 		return c.p, nil
 	}
+	gen := a.gen
 	a.mu.Unlock()
 
 	key, err := a.keys.GetByHash(ctx, hash)
@@ -107,10 +111,12 @@ func (a *Authenticator) Authenticate(ctx context.Context, raw string) (Principal
 
 	p := Principal{Key: key, User: user, Raw: raw}
 	a.mu.Lock()
-	if len(a.cache) >= maxCacheEntries {
-		clear(a.cache)
+	if a.gen == gen {
+		if len(a.cache) >= maxCacheEntries {
+			clear(a.cache)
+		}
+		a.cache[string(hash)] = cachedPrincipal{p: p, expires: now.Add(a.ttl)}
 	}
-	a.cache[string(hash)] = cachedPrincipal{p: p, expires: now.Add(a.ttl)}
 	a.mu.Unlock()
 	return p, nil
 }
@@ -118,6 +124,7 @@ func (a *Authenticator) Authenticate(ctx context.Context, raw string) (Principal
 // Invalidate drops a cached key, by its hash.
 func (a *Authenticator) Invalidate(hash []byte) {
 	a.mu.Lock()
+	a.gen++
 	delete(a.cache, string(hash))
 	a.mu.Unlock()
 }
@@ -126,6 +133,7 @@ func (a *Authenticator) Invalidate(hash []byte) {
 // account, changing the password or deleting it.
 func (a *Authenticator) InvalidateUser(userID int64) {
 	a.mu.Lock()
+	a.gen++
 	for k, c := range a.cache {
 		if c.p.User.ID == userID {
 			delete(a.cache, k)

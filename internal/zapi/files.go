@@ -763,14 +763,19 @@ func (a *API) downloadTarget(c *gin.Context) {
 	h.Set("Content-Type", ctype)
 	h.Set("Content-Disposition", "attachment; filename*=UTF-8''"+rfc5987(name))
 	h.Set("Cache-Control", "no-store")
+	// The server has no WriteTimeout, so without this a client that stops
+	// reading keeps the handler and the open backend reader alive for as
+	// long as it keeps the socket open.
+	dw := httpx.NewDeadlineWriter(c.Writer, a.writeIdle)
+	defer dw.Release()
 	if rs, ok := rd.(io.ReadSeeker); ok {
 		// A zero modtime keeps ServeContent from emitting Last-Modified.
-		http.ServeContent(c.Writer, c.Request, "", time.Time{}, rs)
+		http.ServeContent(dw.ResponseWriter(), c.Request, "", time.Time{}, rs)
 		return
 	}
 	h.Set("Content-Length", strconv.FormatInt(info.Size, 10))
 	c.Status(http.StatusOK)
-	if _, err := io.CopyBuffer(c.Writer, rd, make([]byte, 256<<10)); err != nil {
+	if _, err := io.CopyBuffer(dw, rd, make([]byte, 256<<10)); err != nil {
 		a.log.WarnContext(ctx, "zapi: download interrupted", "err", err)
 	}
 }

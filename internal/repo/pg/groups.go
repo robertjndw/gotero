@@ -155,23 +155,65 @@ func (r groupRepo) Members(ctx context.Context, groupID int64) ([]repo.GroupMemb
 	return out, wrap("list members", err)
 }
 
-// SetMember bumps the version and writes the membership in one statement, so
-// the two cannot drift apart.
+// SetMember bumps the version and writes the membership in one transaction.
+// The group row lock orders it against SetOwner, and the owner guard in SQL
+// covers callers that decided from a stale snapshot: an owner's row is never
+// demoted here, only SetOwner changes it.
 func (r groupRepo) SetMember(ctx context.Context, groupID, userID int64, role string) error {
-	tag, err := r.pool.Exec(ctx, `
-		WITH bumped AS (UPDATE groups SET version = version + 1 WHERE id = $1 RETURNING id)
-		INSERT INTO group_members (group_id, user_id, role)
-		SELECT id, $2, $3 FROM bumped
-		ON CONFLICT (group_id, user_id) DO UPDATE SET role = EXCLUDED.role`, groupID, userID, role)
-	return requireRow(tag, err, "set group member")
+	err := inTx(ctx, r.pool, func(tx pgx.Tx) error {
+		if err := lockGroup(ctx, tx, groupID); err != nil {
+			return err
+		}
+		tag, err := tx.Exec(ctx, `
+			INSERT INTO group_members (group_id, user_id, role) VALUES ($1, $2, $3)
+			ON CONFLICT (group_id, user_id) DO UPDATE SET role = EXCLUDED.role
+			WHERE group_members.role <> 'owner'`, groupID, userID, role)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return fmt.Errorf("owner role cannot be changed: %w", repo.ErrConflict)
+		}
+		_, err = tx.Exec(ctx, `UPDATE groups SET version = version + 1 WHERE id = $1`, groupID)
+		return err
+	})
+	return wrap("set group member", err)
 }
 
+// RemoveMember deletes a non-owner membership. Removing the owner's row would
+// leave groups.owner_id pointing at a non-member, so that is a conflict.
 func (r groupRepo) RemoveMember(ctx context.Context, groupID, userID int64) error {
-	tag, err := r.pool.Exec(ctx, `
-		WITH removed AS (
-			DELETE FROM group_members WHERE group_id = $1 AND user_id = $2 RETURNING 1
-		)
-		UPDATE groups SET version = version + 1 WHERE id = $1 AND EXISTS (SELECT 1 FROM removed)`,
-		groupID, userID)
-	return requireRow(tag, err, "remove group member")
+	err := inTx(ctx, r.pool, func(tx pgx.Tx) error {
+		if err := lockGroup(ctx, tx, groupID); err != nil {
+			return err
+		}
+		tag, err := tx.Exec(ctx,
+			`DELETE FROM group_members WHERE group_id = $1 AND user_id = $2 AND role <> 'owner'`,
+			groupID, userID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			var exists bool
+			if err := tx.QueryRow(ctx,
+				`SELECT EXISTS (SELECT 1 FROM group_members WHERE group_id = $1 AND user_id = $2)`,
+				groupID, userID).Scan(&exists); err != nil {
+				return err
+			}
+			if exists {
+				return fmt.Errorf("owner cannot be removed: %w", repo.ErrConflict)
+			}
+			return repo.ErrNotFound
+		}
+		_, err = tx.Exec(ctx, `UPDATE groups SET version = version + 1 WHERE id = $1`, groupID)
+		return err
+	})
+	return wrap("remove group member", err)
+}
+
+// lockGroup takes the group row lock that SetOwner also holds. An unknown
+// group surfaces as repo.ErrNotFound through mapErr.
+func lockGroup(ctx context.Context, tx pgx.Tx, groupID int64) error {
+	var id int64
+	return tx.QueryRow(ctx, `SELECT id FROM groups WHERE id = $1 FOR UPDATE`, groupID).Scan(&id)
 }

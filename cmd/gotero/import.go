@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/robertjndw/gotero/internal/accounts"
 	"github.com/robertjndw/gotero/internal/config"
 	"github.com/robertjndw/gotero/internal/files"
 	"github.com/robertjndw/gotero/internal/importer"
@@ -52,6 +53,12 @@ func runImport(ctx context.Context, cfg *config.Config, log *slog.Logger, store 
 	}
 	w := importer.New(importer.Deps{
 		Store: store, Files: files.NewService(backend, store.Files(), cfg.Secret), Log: log, BaseURL: *baseURL,
+		// The same instance quota the server applies. The CLI has no
+		// authenticator, which DefaultQuota does not need.
+		DefaultQuota: accounts.New(store, nil, cfg, log).DefaultQuota,
+		// Publisher and Notifier stay unset: they feed the stream hub,
+		// which lives in the server process. Clients connected to a running
+		// server learn about the import on their next regular sync.
 	})
 	check, err := w.ValidateImportKey(ctx, key)
 	if err != nil {
@@ -63,12 +70,42 @@ func runImport(ctx context.Context, cfg *config.Config, log *slog.Logger, store 
 	if !check.Library {
 		return errors.New("the API key cannot read your library; create one with library access")
 	}
+	if !check.Notes {
+		return errors.New("the API key cannot read your notes, so they would be left out; create one with notes access")
+	}
 	job, err := store.Imports().Create(ctx, repo.ImportJob{
 		UserID: user.ID, SourceAPIKey: key, IncludeGroups: !*noGroups, IncludeFiles: !*noFiles,
 	})
+	if errors.Is(err, repo.ErrImportActive) {
+		return resumeImport(ctx, w, store, user, stdout)
+	}
 	if err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(stdout, "Import %d started for %s\n", job.ID, user.Username)
+	return w.RunForeground(ctx, job.ID, stdout)
+}
+
+// resumeImport continues the user's unfinished import, for example one
+// interrupted with Ctrl-C, instead of starting a second one into the same
+// library. It keeps the options and key the job was queued with.
+func resumeImport(ctx context.Context, w *importer.Worker, store repo.Store, user repo.User, stdout io.Writer) error {
+	// A job a killed process left running counts as active until its lease
+	// runs out; requeue it if it already has.
+	if _, err := store.Imports().RequeueExpired(ctx); err != nil {
+		return err
+	}
+	job, err := store.Imports().ActiveForUser(ctx, user.ID)
+	if errors.Is(err, repo.ErrNotFound) {
+		return errors.New("another import for this user just ended; run the command again")
+	}
+	if err != nil {
+		return err
+	}
+	if job.Status == "running" {
+		return fmt.Errorf("import %d for %s is already running in another process (the server or another gotero import); "+
+			"wait for it or cancel it in the web UI. A process that was killed hands the job back after a few minutes", job.ID, user.Username)
+	}
+	_, _ = fmt.Fprintf(stdout, "Resuming import %d for %s, with the options it was started with\n", job.ID, user.Username)
 	return w.RunForeground(ctx, job.ID, stdout)
 }

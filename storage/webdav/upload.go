@@ -145,10 +145,20 @@ func (u *upload) Commit(ctx context.Context, key string) error {
 	}
 	u.finished = true
 	u.cancel()
+	// Abort returns early once finished, so the staged copy is released here.
+	u.discardTmp()
 	if status == http.StatusPreconditionFailed {
 		_ = b.deletePath(context.WithoutCancel(ctx), u.rel)
 	}
 	return nil
+}
+
+func (u *upload) discardTmp() {
+	if u.tmp == nil {
+		return
+	}
+	_ = u.tmp.Close()
+	_ = os.Remove(u.tmp.Name())
 }
 
 // finishPut makes sure the staging file is complete on the server.
@@ -204,9 +214,7 @@ func (u *upload) Abort(ctx context.Context) error {
 	}
 	u.finished = true
 	if u.tmp != nil {
-		name := u.tmp.Name()
-		_ = u.tmp.Close()
-		_ = os.Remove(name)
+		u.discardTmp()
 	} else {
 		_ = u.pw.CloseWithError(errAborted)
 	}
