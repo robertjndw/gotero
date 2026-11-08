@@ -72,6 +72,18 @@ func NewAuthenticator(keys repo.KeyRepo, users repo.UserRepo) *Authenticator {
 // Authenticate looks up raw. It returns ErrInvalidKey for unknown keys and
 // keys of disabled users.
 func (a *Authenticator) Authenticate(ctx context.Context, raw string) (Principal, error) {
+	return a.authenticate(ctx, raw, true)
+}
+
+// AuthenticateFresh is Authenticate without trusting the cache. Callers that
+// exist to notice revocations made outside this process, such as stream
+// revalidation, need it: a cached answer can be up to the cache TTL stale,
+// which would stack on top of their own polling interval.
+func (a *Authenticator) AuthenticateFresh(ctx context.Context, raw string) (Principal, error) {
+	return a.authenticate(ctx, raw, false)
+}
+
+func (a *Authenticator) authenticate(ctx context.Context, raw string, useCache bool) (Principal, error) {
 	if raw == "" {
 		return Principal{}, ErrNoCredentials
 	}
@@ -82,7 +94,7 @@ func (a *Authenticator) Authenticate(ctx context.Context, raw string) (Principal
 	hash := HashToken(raw)
 	now := a.now()
 	a.mu.Lock()
-	if c, ok := a.cache[string(hash)]; ok && now.Before(c.expires) {
+	if c, ok := a.cache[string(hash)]; ok && useCache && now.Before(c.expires) {
 		a.mu.Unlock()
 		c.p.Raw = raw
 		return c.p, nil

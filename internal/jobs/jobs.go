@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"path"
 	"runtime/debug"
 	"sync"
 	"time"
@@ -26,6 +27,10 @@ const (
 	StagingGrace = 24 * time.Hour
 	// BlobGCTimeout bounds removing one orphan, storage round trip included.
 	BlobGCTimeout = 2 * time.Minute
+	// PruneInterval and GCInterval are the mean periods of the scheduled
+	// jobs; each wait is jittered between half and the full period.
+	PruneInterval = 10 * time.Minute
+	GCInterval    = 6 * time.Hour
 )
 
 // GCResult describes one garbage collection pass.
@@ -47,6 +52,9 @@ type Runner struct {
 	// keepDeleted is the delete-log retention; <= 0 keeps the log forever.
 	keepDeleted time.Duration
 	blobTimeout time.Duration
+	// Scheduling periods, fields only so tests can run the loops quickly.
+	pruneEvery time.Duration
+	gcEvery    time.Duration
 
 	// gcMu keeps a manual GC from the admin UI and the scheduled one from
 	// running at the same time.
@@ -56,7 +64,7 @@ type Runner struct {
 func New(store repo.Store, files *files.Service, log *slog.Logger, keepDeleted time.Duration) *Runner {
 	return &Runner{
 		store: store, files: files, log: log, now: time.Now, keepDeleted: keepDeleted,
-		blobTimeout: BlobGCTimeout,
+		blobTimeout: BlobGCTimeout, pruneEvery: PruneInterval, gcEvery: GCInterval,
 	}
 }
 
@@ -82,8 +90,8 @@ func (r *Runner) Run(ctx context.Context) {
 			}
 		}()
 	}
-	loop("prune", 10*time.Minute, r.Prune)
-	loop("gc", 6*time.Hour, func(ctx context.Context) error {
+	loop("prune", r.pruneEvery, r.Prune)
+	loop("gc", r.gcEvery, func(ctx context.Context) error {
 		_, err := r.GC(ctx, false)
 		return err
 	})
@@ -168,6 +176,7 @@ func (r *Runner) GC(ctx context.Context, dryRun bool) (GCResult, error) {
 		}
 		res.StagingFiles = n
 	}
+	errs = r.collectUntracked(ctx, dryRun, &res, errs)
 	if res.OrphanBlobs > 0 || res.StagingFiles > 0 || res.Failed > 0 {
 		r.log.Info("garbage collection", "dry_run", dryRun, "orphan_blobs", res.OrphanBlobs,
 			"orphan_bytes", res.OrphanBytes, "staging_files", res.StagingFiles, "failed", res.Failed)
@@ -176,6 +185,62 @@ func (r *Runner) GC(ctx context.Context, dryRun bool) (GCResult, error) {
 		errs[0] = fmt.Errorf("%d orphan blobs could not be removed, first: %w", res.Failed, errs[0])
 	}
 	return res, errors.Join(errs...)
+}
+
+// ErrUntrackedSuspicious stops the untracked sweep when so much of the store
+// is unknown to the database that the database is more likely wrong than the
+// files: gotero pointed at an empty or restored-from-old database, or a second
+// instance sharing the bucket. Deleting in that state would wipe real files.
+var ErrUntrackedSuspicious = errors.New("jobs: too many stored files are unknown to the database; " +
+	"not deleting any, check that GOTERO_DATABASE_URL and the storage settings belong together")
+
+// untrackedLimit is how many untracked blobs a sweep may delete out of
+// scanned. A crash leaks a handful at a time, so anything near a tenth of
+// the store means the database and the store don't belong together.
+func untrackedLimit(scanned int) int {
+	return max(20, scanned/10)
+}
+
+// collectUntracked removes bytes that have no blobs row at all, which the
+// row-driven pass above can never see. They are counted as orphans.
+func (r *Runner) collectUntracked(ctx context.Context, dryRun bool, res *GCResult, errs []error) []error {
+	cutoff := r.now().Add(-OrphanGrace)
+	untracked, scanned, err := r.files.UntrackedBlobs(ctx, cutoff)
+	if err != nil {
+		return append(errs, err)
+	}
+	if len(untracked) > untrackedLimit(scanned) {
+		r.log.Error("garbage collection: refusing to delete untracked blobs",
+			"untracked", len(untracked), "scanned", scanned, "err", ErrUntrackedSuspicious)
+		return append(errs, ErrUntrackedSuspicious)
+	}
+	for _, info := range untracked {
+		if dryRun {
+			res.OrphanBlobs++
+			res.OrphanBytes += info.Size
+			continue
+		}
+		if ctx.Err() != nil {
+			return append(errs, ctx.Err())
+		}
+		m := path.Base(info.Key)
+		bctx, cancel := context.WithTimeout(ctx, r.blobTimeout)
+		removed, err := r.files.RemoveUntracked(bctx, m, cutoff)
+		cancel()
+		if err != nil {
+			res.Failed++
+			if len(errs) == 0 {
+				errs = append(errs, err)
+			}
+			r.log.Warn("garbage collection: could not remove untracked blob", "md5", m, "err", err)
+			continue
+		}
+		if removed {
+			res.OrphanBlobs++
+			res.OrphanBytes += info.Size
+		}
+	}
+	return errs
 }
 
 // removeOrphan bounds one blob's removal. RemoveOrphan keeps a database

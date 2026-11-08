@@ -17,17 +17,14 @@ import {
 } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Field, usePageTitle } from '@/components/common'
-import { applyServerError } from '@/lib/forms'
+import { applyServerError, MIN_PASSWORD_LENGTH, passwordHint, usernameSchema } from '@/lib/forms'
 import { SsoButtons } from '@/components/sso'
 
 const schema = z.object({
-  username: z
-    .string()
-    .min(3, 'At least 3 characters')
-    .regex(/^[A-Za-z0-9._-]+$/, 'Letters, numbers, dots, dashes and underscores only'),
+  username: usernameSchema,
   displayName: z.string().min(1, 'Enter a display name'),
   email: z.email('Enter a valid email address'),
-  password: z.string().min(8, 'At least 8 characters'),
+  password: z.string().min(MIN_PASSWORD_LENGTH, passwordHint),
 })
 type Values = z.infer<typeof schema>
 
@@ -155,7 +152,7 @@ export default function RegisterPage() {
                 label="Password"
                 htmlFor="password"
                 error={errors.password?.message}
-                hint="At least 8 characters."
+                hint={`${passwordHint}.`}
               >
                 <Input
                   id="password"

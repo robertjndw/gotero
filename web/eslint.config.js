@@ -4,7 +4,16 @@ import reactHooks from 'eslint-plugin-react-hooks'
 import tseslint from 'typescript-eslint'
 
 export default tseslint.config(
-  { ignores: ['node_modules', '../internal/webui/dist', 'public'] },
+  {
+    ignores: [
+      'node_modules',
+      '../internal/webui/dist',
+      'public',
+      'test-results',
+      'playwright-report',
+      'blob-report',
+    ],
+  },
   {
     files: ['**/*.{ts,tsx}'],
     extends: [
@@ -16,5 +25,12 @@ export default tseslint.config(
     rules: {
       '@typescript-eslint/no-explicit-any': 'error',
     },
+  },
+  {
+    // Playwright specs run in Node, and its fixtures pass a callback named
+    // `use`, which the hooks rule mistakes for React's use().
+    files: ['e2e/**/*.ts', 'playwright.config.ts'],
+    languageOptions: { globals: globals.node },
+    rules: { 'react-hooks/rules-of-hooks': 'off' },
   },
 )

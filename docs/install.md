@@ -99,7 +99,9 @@ docker compose -f deploy/compose.yaml pull     # or: git pull && docker compose 
 docker compose -f deploy/compose.yaml up -d
 ```
 
-Database migrations run on startup. Read the release notes before jumping several versions.
+Database migrations run on startup. Read the release notes before jumping several versions, and take a [backup](#backups) first.
+
+To go back to an older release, restore the backup you took before upgrading and start the older image on it. Don't start an older image on a database a newer release has already migrated: it starts without complaint, but nothing guarantees the older code handles the newer schema correctly.
 
 ## Backups
 

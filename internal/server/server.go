@@ -43,6 +43,14 @@ type Server struct {
 	jobs    *jobs.Runner
 	imports *importer.Worker
 	hub     *stream.Hub
+	// engine is kept so tests can list every registered route; once wrapped
+	// in middleware there is no other way back to it.
+	engine *gin.Engine
+
+	// Test hooks: how often streams are revalidated, and a callback with
+	// the bound address so tests can listen on port 0.
+	revalidateEvery time.Duration
+	onListen        func(net.Addr)
 }
 
 // New builds the complete application. ctx is only used for setup work
@@ -76,10 +84,14 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, pool *pgxpoo
 		Notifier:     hub,
 	})
 
-	s := &Server{cfg: cfg, log: log, pool: pool, jobs: runner, imports: imports, hub: hub}
+	s := &Server{
+		cfg: cfg, log: log, pool: pool, jobs: runner, imports: imports, hub: hub,
+		revalidateEvery: streamRevalidateInterval,
+	}
 
 	gin.SetMode(gin.ReleaseMode)
 	engine := gin.New()
+	s.engine = engine
 	// Proxy headers are handled by httpx.ResolvePublicURL with our own
 	// trusted-proxy list; gin must not second-guess the client IP.
 	engine.ForwardedByClientIP = false
@@ -161,6 +173,9 @@ func (s *Server) Run(ctx context.Context) error {
 		return err
 	}
 	s.log.Info("listening", "addr", ln.Addr().String(), "version", version.Version, "storage", s.cfg.Storage.Backend)
+	if s.onListen != nil {
+		s.onListen(ln.Addr())
+	}
 
 	jobsCtx, stopJobs := context.WithCancel(context.WithoutCancel(ctx))
 	var wg sync.WaitGroup
@@ -177,8 +192,16 @@ func (s *Server) Run(ctx context.Context) error {
 	s.log.Info("shutting down")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), s.cfg.ShutdownTimeout)
 	defer cancel()
-	if serr := s.http.Shutdown(shutdownCtx); serr != nil && !errors.Is(serr, http.ErrServerClosed) && err == nil {
-		err = serr
+	if serr := s.http.Shutdown(shutdownCtx); serr != nil {
+		// Requests still running past the timeout are cut off. Closing their
+		// connections cancels their contexts, which aborts their queries:
+		// the caller closes the database pool next, and pgxpool.Close waits
+		// for every connection a forgotten request is still holding.
+		s.log.Warn("graceful shutdown incomplete, closing remaining connections", "err", serr)
+		_ = s.http.Close()
+		if !errors.Is(serr, http.ErrServerClosed) && err == nil {
+			err = serr
+		}
 	}
 	stopJobs()
 	wg.Wait()
@@ -193,7 +216,7 @@ func (s *Server) Run(ctx context.Context) error {
 const streamRevalidateInterval = time.Minute
 
 func (s *Server) revalidateStreams(ctx context.Context) {
-	t := time.NewTicker(streamRevalidateInterval)
+	t := time.NewTicker(s.revalidateEvery)
 	defer t.Stop()
 	for {
 		select {

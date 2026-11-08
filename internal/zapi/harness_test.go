@@ -59,6 +59,7 @@ type envConfig struct {
 	deps     func(*zapi.Deps)
 	pgOpts   []pg.Option
 	maxConns int32
+	pool     func(testing.TB) *pgxpool.Pool
 }
 
 type envOpt func(*envConfig)
@@ -67,13 +68,21 @@ func withDeps(f func(*zapi.Deps)) envOpt { return func(c *envConfig) { c.deps = 
 func withPG(o ...pg.Option) envOpt       { return func(c *envConfig) { c.pgOpts = o } }
 func withMaxConns(n int32) envOpt        { return func(c *envConfig) { c.maxConns = n } }
 
+// withPool replaces the test database pool, e.g. with one that has a tracer.
+func withPool(f func(testing.TB) *pgxpool.Pool) envOpt { return func(c *envConfig) { c.pool = f } }
+
 func newEnv(tb testing.TB, opts ...envOpt) *testEnv {
 	tb.Helper()
 	var cfg envConfig
 	for _, o := range opts {
 		o(&cfg)
 	}
-	pool := pgtest.NewSized(tb, cfg.maxConns)
+	var pool *pgxpool.Pool
+	if cfg.pool != nil {
+		pool = cfg.pool(tb)
+	} else {
+		pool = pgtest.NewSized(tb, cfg.maxConns)
+	}
 	store := pg.New(pool, cfg.pgOpts...)
 	a := auth.NewAuthenticator(store.Keys(), store.Users())
 	pub := &recordingPublisher{}

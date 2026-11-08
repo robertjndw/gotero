@@ -3,6 +3,7 @@ package httpx
 import (
 	"bytes"
 	"compress/gzip"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -10,6 +11,8 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
+	"testing/iotest"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -203,6 +206,9 @@ func TestClientIP(t *testing.T) {
 		{"10.0.0.2:1", "1.1.1.1, 203.0.113.9, 10.0.0.5", "203.0.113.9"}, // forged left part ignored
 		{"10.0.0.2:1", "", "10.0.0.2"},
 		{"10.0.0.2:1", "garbage", "10.0.0.2"},
+		// Our proxy would never append garbage, so whatever sits left of it
+		// was not vouched for by anyone we trust.
+		{"10.0.0.2:1", "1.2.3.4, garbage", "10.0.0.2"},
 	}
 	for _, c := range cases {
 		var got string
@@ -236,5 +242,99 @@ func TestRedactPath(t *testing.T) {
 		if got := RedactPath(in); got != want {
 			t.Errorf("%s: got %s want %s", in, got, want)
 		}
+	}
+}
+
+// The probe read at the limit must not reject a body that ends exactly there.
+func TestDecodeBodyGzipExactlyAtLimit(t *testing.T) {
+	payload := bytes.Repeat([]byte("0123456789abcdef"), 4096)
+	for _, limit := range []int64{int64(len(payload)), int64(len(payload)) - 1} {
+		var got []byte
+		var gotErr error
+		var contentLength int64
+		var encoding string
+		h := DecodeBody(limit)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			contentLength, encoding = r.ContentLength, r.Header.Get("Content-Encoding")
+			// One byte at a time, so the limit is reached by a read that
+			// returns no error and the probe has to decide.
+			got, gotErr = io.ReadAll(iotest.OneByteReader(r.Body))
+		}))
+		body := gz(t, payload)
+		req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
+		req.Header.Set("Content-Encoding", "gzip")
+		h.ServeHTTP(httptest.NewRecorder(), req)
+
+		// Handlers size buffers from ContentLength, and the compressed
+		// length the request arrived with says nothing about the plain body.
+		if contentLength != -1 || encoding != "" {
+			t.Fatalf("limit %d: ContentLength=%d Content-Encoding=%q after gunzip", limit, contentLength, encoding)
+		}
+		if limit == int64(len(payload)) {
+			if gotErr != nil || !bytes.Equal(got, payload) {
+				t.Fatalf("body of exactly the limit: err=%v len=%d", gotErr, len(got))
+			}
+		} else if !IsTooLarge(gotErr) {
+			t.Fatalf("body one byte over the limit: err=%v len=%d", gotErr, len(got))
+		}
+	}
+}
+
+func TestLogRecoversErrorPanic(t *testing.T) {
+	h := Log(discardLogger())(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic(errors.New("boom"))
+	}))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/x", nil))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status %d", rec.Code)
+	}
+}
+
+// ErrAbortHandler is net/http's way of dropping a connection on purpose; it
+// has to reach the server rather than turn into a 500.
+func TestLogRepanicsAbortHandler(t *testing.T) {
+	h := Log(discardLogger())(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic(http.ErrAbortHandler)
+	}))
+	defer func() {
+		if err, _ := recover().(error); !errors.Is(err, http.ErrAbortHandler) {
+			t.Fatalf("recovered %v, want http.ErrAbortHandler", err)
+		}
+	}()
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/x", nil))
+}
+
+func TestRetryAfter(t *testing.T) {
+	for d, want := range map[time.Duration]string{
+		-time.Second:                   "1",
+		0:                              "1",
+		time.Nanosecond:                "1",
+		time.Second:                    "1",
+		time.Second + time.Millisecond: "2",
+		2 * time.Second:                "2",
+		90 * time.Second:               "90",
+	} {
+		if got := RetryAfter(d); got != want {
+			t.Errorf("RetryAfter(%v) = %q, want %q", d, got, want)
+		}
+	}
+}
+
+func TestChainOrder(t *testing.T) {
+	var order []string
+	mw := func(name string) func(http.Handler) http.Handler {
+		return func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				order = append(order, name)
+				next.ServeHTTP(w, r)
+			})
+		}
+	}
+	h := Chain(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		order = append(order, "handler")
+	}), mw("outer"), mw("middle"), mw("inner"))
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+	if got := strings.Join(order, ","); got != "outer,middle,inner,handler" {
+		t.Fatalf("order %s", got)
 	}
 }

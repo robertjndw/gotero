@@ -21,10 +21,28 @@ var (
 	skipReason string
 )
 
+// external is a real provider bucket (AWS, R2, B2, ...) to run against
+// instead of the local container. S3 clones differ in the corners this
+// backend leans on (multipart minimums, copy semantics, listing order), and
+// versitygw only shows how one of them behaves.
+var external = struct {
+	endpoint, region, bucket, accessKey, secretKey string
+	insecure                                       bool
+}{
+	endpoint:  os.Getenv("GOTERO_S3_TEST_ENDPOINT"),
+	region:    os.Getenv("GOTERO_S3_TEST_REGION"),
+	bucket:    os.Getenv("GOTERO_S3_TEST_BUCKET"),
+	accessKey: os.Getenv("GOTERO_S3_TEST_ACCESS_KEY"),
+	secretKey: os.Getenv("GOTERO_S3_TEST_SECRET_KEY"),
+	insecure:  os.Getenv("GOTERO_S3_TEST_INSECURE") == "1",
+}
+
 func TestMain(m *testing.M) {
 	flag.Parse()
 	var srv *containertest.Server
-	if !testing.Short() {
+	if external.endpoint != "" {
+		serverAddr = external.endpoint
+	} else if !testing.Short() {
 		var err error
 		srv, err = containertest.StartVersityGW("test", "testsecret")
 		if err != nil {
@@ -40,7 +58,7 @@ func TestMain(m *testing.M) {
 
 func server(t *testing.T) string {
 	t.Helper()
-	if testing.Short() {
+	if testing.Short() && external.endpoint == "" {
 		t.Skip("container tests skipped in -short mode")
 	}
 	if serverAddr == "" {
@@ -61,6 +79,16 @@ func newBackend(t *testing.T, mod func(*s3.Config)) *s3.Backend {
 		SecretKey:    "testsecret",
 		PartSize:     s3.MinPartSize,
 		CreateBucket: true,
+	}
+	if external.endpoint != "" {
+		// Real providers rarely let a test key create buckets, so every test
+		// gets its own prefix in one existing bucket instead. Give that bucket
+		// a lifecycle rule that expires objects, since a failed test can leave
+		// some behind.
+		cfg.Bucket, cfg.CreateBucket = external.bucket, false
+		cfg.Region, cfg.UseSSL = external.region, !external.insecure
+		cfg.AccessKey, cfg.SecretKey = external.accessKey, external.secretKey
+		cfg.Prefix = "gotero-test/" + hex.EncodeToString(id[:])
 	}
 	if mod != nil {
 		mod(&cfg)

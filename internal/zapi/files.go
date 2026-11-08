@@ -750,6 +750,11 @@ func (a *API) downloadTarget(c *gin.Context) {
 	}
 	rd, info, err := a.files.Open(ctx, af.MD5)
 	if errors.Is(err, storage.ErrNotFound) {
+		// The row says the file is registered, so its bytes are gone: lost
+		// or deleted behind gotero's back. The client can only be told it is
+		// missing, but somebody has to restore it.
+		a.log.ErrorContext(ctx, "zapi: registered file is missing from storage", "md5", af.MD5,
+			"library", claims.LibraryID, "item", claims.ItemKey)
 		Fail(c, http.StatusNotFound, "File not found")
 		return
 	}

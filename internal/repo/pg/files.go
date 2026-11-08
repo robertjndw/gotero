@@ -117,6 +117,22 @@ func deleteOrphanBlob(ctx context.Context, q querier, md5 string, olderThan time
 	return tag.RowsAffected() == 1, nil
 }
 
+// untrackedCond matches md5 values (column m) with neither a blobs row nor
+// a live upload token. The token clause protects an upload that has
+// committed its bytes but not yet recorded the row.
+const untrackedCond = `
+		NOT EXISTS (SELECT 1 FROM blobs b WHERE b.md5 = m)
+		AND NOT EXISTS (SELECT 1 FROM upload_tokens u WHERE u.md5 = m AND u.expires_at > now())`
+
+func (r fileRepo) UntrackedBlobs(ctx context.Context, md5s []string) ([]string, error) {
+	rows, err := r.pool.Query(ctx, `SELECT m FROM unnest($1::text[]) AS m WHERE`+untrackedCond, md5s)
+	if err != nil {
+		return nil, wrap("untracked blobs", err)
+	}
+	out, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	return out, wrap("untracked blobs", err)
+}
+
 // LockBlob uses a transaction-scoped advisory lock rather than a row lock
 // because the row may not exist yet (first upload) or may be the very thing
 // being deleted. The two-int form keeps blob locks in their own key space,
@@ -158,6 +174,12 @@ func (t blobTx) Put(ctx context.Context, size int64) error {
 
 func (t blobTx) DeleteIfOrphan(ctx context.Context, olderThan time.Time) (bool, error) {
 	return deleteOrphanBlob(ctx, t.q, t.md5, olderThan)
+}
+
+func (t blobTx) Untracked(ctx context.Context) (bool, error) {
+	var ok bool
+	err := t.q.QueryRow(ctx, `SELECT `+untrackedCond+` FROM (SELECT $1::text AS m) AS x`, t.md5).Scan(&ok)
+	return ok, wrap("blob untracked", err)
 }
 
 func (r fileRepo) Stats(ctx context.Context) (repo.FileStats, error) {

@@ -550,6 +550,10 @@ type FileRepo interface {
 	// the same rules as OrphanBlobs, checked atomically. It reports whether
 	// the row was removed; only then may the caller delete the bytes.
 	DeleteOrphanBlob(ctx context.Context, md5 string, olderThan time.Time) (bool, error)
+	// UntrackedBlobs returns those of md5s that have no blobs row and no
+	// live upload token: bytes in storage that nothing records. Only a hint
+	// for garbage collection; BlobTx.Untracked decides under the lock.
+	UntrackedBlobs(ctx context.Context, md5s []string) ([]string, error)
 	// LockBlob runs fn in a transaction holding a cross-process lock on md5
 	// and commits if fn returns nil. It pins a pool connection until fn
 	// returns, so fn must do only bounded work and must not use the pool.
@@ -564,6 +568,9 @@ type BlobTx interface {
 	// DeleteIfOrphan is DeleteOrphanBlob for the locked blob. The delete
 	// only becomes visible to others when the transaction commits.
 	DeleteIfOrphan(ctx context.Context, olderThan time.Time) (bool, error)
+	// Untracked reports whether the locked blob has no row and no live
+	// upload token, so its bytes, if any, belong to nobody.
+	Untracked(ctx context.Context) (bool, error)
 }
 
 type FileStats struct {

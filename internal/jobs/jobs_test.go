@@ -32,6 +32,7 @@ type env struct {
 	run   *Runner
 	lib   int64
 	pool  *pgxpool.Pool
+	root  string // the local backend's directory
 	exec  func(sql string, args ...any)
 }
 
@@ -39,7 +40,8 @@ func setup(t *testing.T) *env {
 	t.Helper()
 	pool := pgtest.New(t)
 	store := pg.New(pool)
-	be, err := local.New(t.TempDir())
+	root := t.TempDir()
+	be, err := local.New(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +51,7 @@ func setup(t *testing.T) *env {
 		t.Fatal(err)
 	}
 	return &env{
-		store: store, fs: fs, be: be, lib: u.LibraryID, pool: pool,
+		store: store, fs: fs, be: be, lib: u.LibraryID, pool: pool, root: root,
 		run: New(store, fs, slog.New(slog.NewTextHandler(io.Discard, nil)), 0),
 		exec: func(sql string, args ...any) {
 			if _, err := pool.Exec(context.Background(), sql, args...); err != nil {

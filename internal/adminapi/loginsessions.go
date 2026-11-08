@@ -104,10 +104,20 @@ func (a *API) approveLoginSession(c *gin.Context) error {
 func (a *API) cancelLoginSession(c *gin.Context) error {
 	ctx := c.Request.Context()
 	hash := auth.HashToken(c.Param("token"))
+	// A client that asked for a specific account may only be turned away by
+	// that account, the same rule approve applies. The binding never
+	// changes after creation, so checking before Cancel is not racy.
+	s, err := a.Store.LoginSessions().Get(ctx, hash)
+	if err != nil {
+		return notFoundAs(err, "Unknown login session.")
+	}
+	if s.RequiredUserID != nil && *s.RequiredUserID != currentUser(c).ID {
+		return newErr(http.StatusForbidden, "user_mismatch", "This Zotero client is linked to a different account.")
+	}
 	if err := a.Store.LoginSessions().Cancel(ctx, hash); err != nil {
 		return notFoundAs(err, "Unknown login session.")
 	}
-	s, err := a.Store.LoginSessions().Get(ctx, hash)
+	s, err = a.Store.LoginSessions().Get(ctx, hash)
 	if err != nil {
 		return err
 	}

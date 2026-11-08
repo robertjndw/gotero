@@ -294,6 +294,11 @@ func (a *API) putObject(t repo.ObjectType, replace bool) gin.HandlerFunc {
 			if !exists {
 				return &httpError{status: http.StatusNotFound, version: tx.Version(), msg: kindLabel(t) + " not found"}
 			}
+			// Before the version check, like planOne, or a stale header would
+			// read a hidden note's version out of the 412 message.
+			if !l.Access.Notes && cur.ItemType == "note" {
+				return &httpError{status: http.StatusForbidden, version: tx.Version(), msg: errNotesDenied.Msg}
+			}
 			// For a single object the header refers to the object's version.
 			if pre.ok && cur.Version > pre.v {
 				return &httpError{
@@ -399,15 +404,17 @@ func (a *API) deleteObject(t repo.ObjectType) gin.HandlerFunc {
 			if !exists {
 				return &httpError{status: http.StatusNotFound, version: tx.Version(), msg: kindLabel(t) + " not found"}
 			}
+			// Before the version check so a 412 cannot leak a hidden note's
+			// version.
+			if !l.Access.Notes && cur.ItemType == "note" {
+				return &httpError{status: http.StatusForbidden, version: tx.Version(), msg: errNotesDenied.Msg}
+			}
 			if cur.Version > pre.v {
 				return &httpError{
 					status: http.StatusPreconditionFailed, version: tx.Version(),
 					msg: fmt.Sprintf("%s has been modified since specified version (expected %d, found %d)",
 						kindLabel(t), pre.v, cur.Version),
 				}
-			}
-			if !l.Access.Notes && cur.ItemType == "note" {
-				return &httpError{status: http.StatusForbidden, version: tx.Version(), msg: errNotesDenied.Msg}
 			}
 			return deleteKeys(ctx, tx, t, []string{key})
 		})
