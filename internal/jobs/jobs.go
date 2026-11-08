@@ -146,7 +146,11 @@ func (r *Runner) GC(ctx context.Context, dryRun bool) (GCResult, error) {
 		res.OrphanBlobs++
 		res.OrphanBytes += b.Size
 	}
-	var errs []error
+	var (
+		errs []error
+		// Kept out of errs so the summary below only ever wraps a blob error.
+		firstFail error
+	)
 	if !dryRun {
 		res.OrphanBlobs, res.OrphanBytes = 0, 0
 		cutoff := r.now().Add(-OrphanGrace)
@@ -159,8 +163,8 @@ func (r *Runner) GC(ctx context.Context, dryRun bool) (GCResult, error) {
 			removed, err := r.removeOrphan(ctx, b.MD5, cutoff)
 			if err != nil {
 				res.Failed++
-				if len(errs) == 0 {
-					errs = append(errs, err)
+				if firstFail == nil {
+					firstFail = err
 				}
 				r.log.Warn("garbage collection: could not remove orphan blob", "md5", b.MD5, "err", err)
 				continue
@@ -176,15 +180,39 @@ func (r *Runner) GC(ctx context.Context, dryRun bool) (GCResult, error) {
 		}
 		res.StagingFiles = n
 	}
-	errs = r.collectUntracked(ctx, dryRun, &res, errs)
+	if err := r.collectUntracked(ctx, dryRun, &res, &firstFail); err != nil {
+		errs = append(errs, err)
+	}
 	if res.OrphanBlobs > 0 || res.StagingFiles > 0 || res.Failed > 0 {
 		r.log.Info("garbage collection", "dry_run", dryRun, "orphan_blobs", res.OrphanBlobs,
 			"orphan_bytes", res.OrphanBytes, "staging_files", res.StagingFiles, "failed", res.Failed)
 	}
-	if res.Failed > 0 {
-		errs[0] = fmt.Errorf("%d orphan blobs could not be removed, first: %w", res.Failed, errs[0])
+	if firstFail != nil {
+		errs = append(errs, fmt.Errorf("%w: %d failed, first: %w", ErrBlobsNotRemoved, res.Failed, firstFail))
 	}
 	return res, errors.Join(errs...)
+}
+
+// ErrBlobsNotRemoved marks the part of a GC error that is only about single
+// blobs whose removal failed. The rest of the sweep still ran, and those
+// blobs are retried on the next pass.
+var ErrBlobsNotRemoved = errors.New("jobs: orphan blobs could not be removed")
+
+// OnlyBlobFailures reports whether every error GC returned is an
+// ErrBlobsNotRemoved, so the pass counts as done apart from those blobs.
+func OnlyBlobFailures(err error) bool {
+	if err == nil {
+		return false
+	}
+	if j, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, e := range j.Unwrap() {
+			if !OnlyBlobFailures(e) {
+				return false
+			}
+		}
+		return true
+	}
+	return errors.Is(err, ErrBlobsNotRemoved)
 }
 
 // ErrUntrackedSuspicious stops the untracked sweep when so much of the store
@@ -203,16 +231,18 @@ func untrackedLimit(scanned int) int {
 
 // collectUntracked removes bytes that have no blobs row at all, which the
 // row-driven pass above can never see. They are counted as orphans.
-func (r *Runner) collectUntracked(ctx context.Context, dryRun bool, res *GCResult, errs []error) []error {
+// Per-blob failures go to firstFail and res.Failed; the returned error is
+// for anything that stopped the sweep itself.
+func (r *Runner) collectUntracked(ctx context.Context, dryRun bool, res *GCResult, firstFail *error) error {
 	cutoff := r.now().Add(-OrphanGrace)
 	untracked, scanned, err := r.files.UntrackedBlobs(ctx, cutoff)
 	if err != nil {
-		return append(errs, err)
+		return err
 	}
 	if len(untracked) > untrackedLimit(scanned) {
 		r.log.Error("garbage collection: refusing to delete untracked blobs",
 			"untracked", len(untracked), "scanned", scanned, "err", ErrUntrackedSuspicious)
-		return append(errs, ErrUntrackedSuspicious)
+		return ErrUntrackedSuspicious
 	}
 	for _, info := range untracked {
 		if dryRun {
@@ -221,7 +251,7 @@ func (r *Runner) collectUntracked(ctx context.Context, dryRun bool, res *GCResul
 			continue
 		}
 		if ctx.Err() != nil {
-			return append(errs, ctx.Err())
+			return ctx.Err()
 		}
 		m := path.Base(info.Key)
 		bctx, cancel := context.WithTimeout(ctx, r.blobTimeout)
@@ -229,8 +259,8 @@ func (r *Runner) collectUntracked(ctx context.Context, dryRun bool, res *GCResul
 		cancel()
 		if err != nil {
 			res.Failed++
-			if len(errs) == 0 {
-				errs = append(errs, err)
+			if *firstFail == nil {
+				*firstFail = err
 			}
 			r.log.Warn("garbage collection: could not remove untracked blob", "md5", m, "err", err)
 			continue
@@ -240,7 +270,7 @@ func (r *Runner) collectUntracked(ctx context.Context, dryRun bool, res *GCResul
 			res.OrphanBytes += info.Size
 		}
 	}
-	return errs
+	return nil
 }
 
 // removeOrphan bounds one blob's removal. RemoveOrphan keeps a database

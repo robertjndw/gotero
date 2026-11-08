@@ -297,7 +297,7 @@ func (a *API) runGC(c *gin.Context) error {
 		// Blobs that could not be removed are logged by GC and retried on the
 		// next pass; the rest of the sweep still happened, so report it with
 		// a count rather than failing the whole request.
-		if res, err = a.GC.GC(c.Request.Context(), in.DryRun); err != nil && res.Failed == 0 {
+		if res, err = a.GC.GC(c.Request.Context(), in.DryRun); err != nil && !jobs.OnlyBlobFailures(err) {
 			return err
 		}
 	}

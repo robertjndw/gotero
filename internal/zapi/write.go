@@ -176,9 +176,10 @@ func planWrite(ctx context.Context, g getter, opts planOpts, raws []json.RawMess
 	// The tree checks look at the request as a whole, and failing an object
 	// puts its stored state back, which can strand or invalidate others.
 	// Failures only ever grow, so this settles.
+	tree := newPlanTree(g, opts.Kind, existing, refs)
 	for {
 		failOrphans(opts.Kind, entries, out, existing, batchKeys)
-		n, err := checkTree(ctx, g, opts.Kind, out, existing, refs)
+		n, err := tree.check(ctx, out, existing)
 		if err != nil {
 			return nil, err
 		}
@@ -774,21 +775,30 @@ func (t *planTree) node(ctx context.Context, key string) (treeNode, bool, error)
 	return n, true, nil
 }
 
-// checkTree fails objects whose planned parent would break the item or
-// collection tree and returns how many it failed. Only edges the request
-// changes are judged, so a library that is already inconsistent can still
-// be edited, and repaired.
-func checkTree(ctx context.Context, g getter, kind repo.ObjectType, out []outcome, existing map[string]repo.Object, refs refSets) (int, error) {
-	if kind != repo.TypeItem && kind != repo.TypeCollection {
-		return 0, nil
-	}
-	t := &planTree{g: g, kind: kind, saved: map[string]treeNode{}, stored: map[string]treeNode{}}
+// newPlanTree seeds the stored side of the tree with what planWrite already
+// loaded. It outlives one check, so repeated rounds do not query storage
+// again for nodes an earlier round looked up.
+func newPlanTree(g getter, kind repo.ObjectType, existing map[string]repo.Object, refs refSets) *planTree {
+	t := &planTree{g: g, kind: kind, stored: map[string]treeNode{}}
 	for k, o := range refs.parents {
 		t.stored[k] = nodeOf(kind, o.Data)
 	}
 	for k, o := range existing {
 		t.stored[k] = nodeOf(kind, o.Data)
 	}
+	return t
+}
+
+// check fails objects whose planned parent would break the item or
+// collection tree and returns how many it failed. Only edges the request
+// changes are judged, so a library that is already inconsistent can still
+// be edited, and repaired.
+func (t *planTree) check(ctx context.Context, out []outcome, existing map[string]repo.Object) (int, error) {
+	kind := t.kind
+	if kind != repo.TypeItem && kind != repo.TypeCollection {
+		return 0, nil
+	}
+	t.saved = map[string]treeNode{}
 	for _, o := range out {
 		if o.Status == outCreated || o.Status == outUpdated {
 			t.saved[o.Key] = nodeOf(kind, o.Obj.Data)

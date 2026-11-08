@@ -3,8 +3,6 @@ package pg
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"iter"
 	"time"
 
@@ -218,16 +216,11 @@ func (r importRepo) one(ctx context.Context, op, sql string, args ...any) (repo.
 }
 
 func (r importRepo) Create(ctx context.Context, j repo.ImportJob) (repo.ImportJob, error) {
-	out, err := r.one(ctx, "create import job", `
+	return r.one(ctx, "create import job", `
 		INSERT INTO import_jobs (user_id, source_api_key, include_groups, include_files, cursor, progress)
 		VALUES ($1, $2, $3, $4, $5::text::jsonb, $6::text::jsonb) RETURNING `+importCols,
 		j.UserID, nullIfEmpty(j.SourceAPIKey), j.IncludeGroups, j.IncludeFiles,
 		jsonOrEmpty(j.Cursor), jsonOrEmpty(j.Progress))
-	if errors.Is(err, repo.ErrConflict) {
-		// The only unique constraint a new row can hit.
-		return repo.ImportJob{}, fmt.Errorf("create import job: %w", repo.ErrImportActive)
-	}
-	return out, err
 }
 
 func (r importRepo) Get(ctx context.Context, id int64) (repo.ImportJob, error) {

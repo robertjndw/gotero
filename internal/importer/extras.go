@@ -126,14 +126,15 @@ func (r *run) syncFulltext(ctx context.Context, l *lib) error {
 			if _, ok := items[key]; !ok {
 				return nil
 			}
-			c, v, err := l.src.Fulltext(ctx, key)
+			// Not observed for drift: zotero.org answers this endpoint with
+			// the version of the item's full text, not the library's.
+			c, _, err := l.src.Fulltext(ctx, key)
 			if zoteroclient.IsNotFound(err) {
 				return nil
 			}
 			if err != nil {
 				return err
 			}
-			l.observe(r, v)
 			f := repo.Fulltext{ItemKey: key, Content: c.Content, Version: remote[key]}
 			if c.UsesPages() {
 				f.IndexedPages, f.TotalPages = &c.IndexedPages, &c.TotalPages
